@@ -1,4 +1,4 @@
-# dom-top
+# Dom Top
 
 Unorthodox control flow, for Clojurists with masochistic sensibilities.
 Available via [clojars](https://clojars.org/dom-top).
