@@ -5,7 +5,7 @@ Available via [clojars](https://clojars.org/dom-top).
 
 ## Tour
 
-See [dom-top.core](src/dom-top/core.clj) for comprehensive documentation with
+See [dom-top.core](src/dom_top/core.clj) for comprehensive documentation with
 examples.
 
 - `fcatch` lifts functions that throw exceptions into functions that *return*
