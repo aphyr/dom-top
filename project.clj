@@ -1,4 +1,4 @@
-(defproject dom-top "1.0.0"
+(defproject dom-top "1.0.1"
   :description "Unorthodox control flow"
   :url "http://github.com/aphyr/dom-top"
   :license {:name "Eclipse Public License"
