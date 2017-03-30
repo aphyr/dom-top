@@ -61,8 +61,8 @@
     `(loop [~@initial-bindings]
        (let [~retval (try ~@body)]
          (if (instance? Retry ~retval)
-           (recur ~@(->> (range bindings-count)
-                         (map (fn [i] `(nth (.bindings ~retval) ~i)))))
+           (recur ~@(map (fn [i] `(nth (.bindings ~retval) ~i))
+                              (range bindings-count)))
            ~retval)))))
 
 (deftype Return [value])
