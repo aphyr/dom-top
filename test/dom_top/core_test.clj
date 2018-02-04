@@ -17,6 +17,20 @@
     (testing "counts down correctly"
       (is (= (range n) (sort (map second results)))))))
 
+(deftest bounded-pmap-test
+  (let [n       1000
+        threads (atom #{})
+        results (bounded-pmap (fn [i]
+                                (swap! threads conj (Thread/currentThread))
+                                (- i))
+                              (range n))]
+    (testing "Performs transformation preserving order"
+      (is (= results (map - (range n)))))
+
+    (testing "Bounded concurrency"
+      (is (<= (count @threads)
+              (+ 2 (.. Runtime getRuntime availableProcessors)))))))
+
 (deftest with-retry-test
   (testing "no bindings"
     (is (= 1 (with-retry []

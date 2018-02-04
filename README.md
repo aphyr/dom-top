@@ -14,6 +14,8 @@ examples.
   aborting early on failure cases.
 - `real-pmap` provides a fully parallel version of `map`, which spawns one
   thread per element, instead of running on a limited threadpool.
+- `bounded-pmap`, by contrast, puts a global limit on parallelism for CPU-bound
+  tasks.
 - `with-retry` provides `recur` that works through `try/catch` blocks;
   particularly useful for retrying network operations.
 
