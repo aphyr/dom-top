@@ -13,11 +13,51 @@
     (try (apply f args)
          (catch Exception e e))))
 
+(defn bounded-future-call
+  "Like clojure.core/future-call, but runs on the bounded agent executor
+  instead of the unbounded one. Useful for CPU-bound futures."
+  [f]
+  ; Adapted from clojure.core/future-call
+  (let [f (#'clojure.core/binding-conveyor-fn f)
+        fut (.submit clojure.lang.Agent/pooledExecutor ^Callable f)]
+    (reify
+      clojure.lang.IDeref
+      (deref [_] (#'clojure.core/deref-future fut))
+      clojure.lang.IBlockingDeref
+      (deref
+        [_ timeout-ms timeout-val]
+        (#'clojure.core/deref-future fut timeout-ms timeout-val))
+      clojure.lang.IPending
+      (isRealized [_] (.isDone fut))
+      java.util.concurrent.Future
+      (get [_] (.get fut))
+      (get [_ timeout unit] (.get fut timeout unit))
+      (isCancelled [_] (.isCancelled fut))
+      (isDone [_] (.isDone fut))
+      (cancel [_ interrupt?] (.cancel fut interrupt?)))))
+
+(defmacro bounded-future
+  "Like future, but runs on the bounded agent executor. Useful for CPU-bound
+  futures."
+  [& body]
+  `(bounded-future-call (^{:once true} fn* [] ~@body)))
+
+(defn bounded-pmap
+  "Like pmap, but spawns tasks immediately, and uses the global bounded agent
+  threadpool. Ideal for computationally bound tasks, especially when you might
+  want to, say, pmap *inside* each of several parallel tasks without spawning
+  eight gazillion threads."
+  [f coll]
+  (->> coll
+       (map (fn launcher [x] (bounded-future (f x))))
+       doall
+       (map deref)))
+
 (defn real-pmap
-  "Like pmap, but not lazy, and launches futures instead of using a bounded
-  threadpool. Useful when your tasks might block on each other, and you don't
-  want to deadlock by exhausting the default clojure worker threadpool halfway
-  through the collection. For instance,
+  "Like pmap, but spawns tasks immediately, and launches futures instead of
+  using a bounded threadpool. Useful when your tasks might block on each other,
+  and you don't want to deadlock by exhausting the default clojure worker
+  threadpool halfway through the collection. For instance,
 
       (let [n 1000
             b (CyclicBarrier. n)]
@@ -29,21 +69,6 @@
        (map (fn launcher [x] (future (f x))))
        doall
        (map deref)))
-
-(defn bounded-pmap
-  "Like pmap, but not lazy, and uses the global bounded agent threadpool. Ideal
-  for computationally bound tasks, especially when you might want to, say, pmap
-  *inside* each of several parallel tasks without spawning eight gazillion
-  threads."
-  [f coll]
-  ; Adapted from clojure.core/future-call
-  (let [f (#'clojure.core/binding-conveyor-fn f)]
-    (->> coll
-         (map (fn launcher [x]
-                (.submit clojure.lang.Agent/pooledExecutor
-                         ^Callable (partial f x))))
-         doall
-         (map #'clojure.core/deref-future))))
 
 (defrecord Retry [bindings])
 

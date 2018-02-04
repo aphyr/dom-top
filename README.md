@@ -12,6 +12,7 @@ examples.
   exceptions.
 - `letr` provides let bindings with early return; particular useful for
   aborting early on failure cases.
+- `bounded-future` is just like `future`, but for CPU-bound tasks.
 - `real-pmap` provides a fully parallel version of `map`, which spawns one
   thread per element, instead of running on a limited threadpool.
 - `bounded-pmap`, by contrast, puts a global limit on parallelism for CPU-bound
