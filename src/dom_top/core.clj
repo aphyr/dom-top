@@ -3,20 +3,45 @@
   (:require [clojure.walk :as walk]))
 
 (defmacro disorderly
-  "Like (do), but evaluates expressions in a random order each time. Helpful
-  when you want side effects, but you're not exactly sure how. Returns the
-  result of evaluating the final (e.g. any) branch, because that seems like
-  fun."
+  "This is a chaotic do expression. Like `do`, takes any number of forms. Where
+  `do` evaluates forms in order, `disorderly` evaluates them in a random order.
+  Where `do` returns the result of evaluating the final form, `disorderly`
+  returns a sequence of the results of each form, in lexical (as opposed to
+  execution) order, making it suitable for binding results.
+
+  This is particularly helpful when you want side effects, but you're not
+  exactly sure how. Consider, for instance, testing that several mutations of
+  an object all commute.
+
+      (disorderly (do (prn 1) :a)
+                  (do (prn 2) :b))
+
+  ... prints either 1 then 2, or 2 then 1, but always returns (:a :b). Note
+  that `disorderly` is *not* concurrent: branches evaluate in some order; it's
+  just not a deterministic one."
   ([a]
-   a)
+   (list a))
   ([a b]
    `(if (< (rand) 0.5)
-      (do ~a ~b)
-      (do ~b ~a)))
+      (let [a# ~a
+            b# ~b]
+        (list a# b#))
+      (let [b# ~b
+            a# ~a]
+        (list a# b#))))
   ([a b & more]
-   (let [forms (mapv (fn [form] `(fn [] ~form)) (cons a (cons b more)))]
-     `(doseq [f# (shuffle ~forms)]
-        (f#)))))
+   ; With six branches, it makes more sense to use fns and pay the invocation
+   ; overhead, I think. We'll make a bunch of fns and update a mutable object
+   ; array when each fn is called
+   (let [results (gensym 'results)
+         forms   (->> (cons a (cons b more))
+                      (map-indexed (fn [i form]
+                                     `(fn [] (aset ~results ~i ~form))))
+                      vec)]
+     `(let [~results (object-array ~(count forms))]
+        (doseq [f# (shuffle ~forms)]
+          (f#))
+        (seq ~results)))))
 
 (defn fcatch
   "Takes a function and returns a version of it which returns, rather than

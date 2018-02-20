@@ -8,19 +8,24 @@
     (let [n         100
           outcomes  (->> (fn []
                            (let [a (atom [])]
-                             (disorderly
-                               (swap! a conj 0)
-                               (swap! a conj 1))
-                             @a))
+                             [(disorderly
+                                (do (swap! a conj 0) :a)
+                                (do (swap! a conj 1) :b))
+                              @a]))
                          repeatedly
-                         (take n)
-                         frequencies)]
+                         (take n))
+          returns   (frequencies (map first outcomes))
+          effects   (frequencies (map second outcomes))]
+
+      (testing "return vals in order"
+        (is (= {[:a :b] n} returns)))
+
       (testing "evaluates both branches"
         (is (= #{[0 1] [1 0]}
-               (set (keys outcomes)))))
+               (set (keys effects)))))
 
       (testing "roughly as often"
-        (->> (vals outcomes)
+        (->> (vals effects)
              (every? (fn [freq] (<= (Math/abs (double (- freq (/ n 2))))
                                     (Math/sqrt n))))
              is))))
@@ -29,20 +34,25 @@
     (let [n   100
           outcomes (->> (fn []
                           (let [a (atom [])]
-                            (disorderly
-                              (swap! a conj 0)
-                              (swap! a conj 1)
-                              (swap! a conj 2))
-                            @a))
+                            [(disorderly
+                               (do (swap! a conj 0) :a)
+                               (do (swap! a conj 1) :b)
+                               (do (swap! a conj 2) :c))
+                             @a]))
                         repeatedly
-                        (take n)
-                        frequencies)]
+                        (take n))
+          returns (frequencies (map first outcomes))
+          effects (frequencies (map second outcomes))]
+
+      (testing "return vals in order"
+        (is (= {[:a :b :c] n} returns)))
+
       (testing "evaluates all branches"
         (is (= #{[0 1 2] [0 2 1] [1 0 2] [1 2 0] [2 0 1] [2 1 0]}
-               (set (keys outcomes)))))
+               (set (keys effects)))))
 
       (testing "roughly as often"
-        (->> (vals outcomes)
+        (->> (vals effects)
              (every? (fn [freq]
                        (<= (Math/abs (double (- freq (/ n 6))))
                            (Math/sqrt n))))
