@@ -3,6 +3,52 @@
             [dom-top.core :refer :all])
   (:import (java.util.concurrent CyclicBarrier)))
 
+(deftest disorderly-test
+  (testing "2 branches"
+    (let [n         100
+          outcomes  (->> (fn []
+                           (let [a (atom [])]
+                             (disorderly
+                               (swap! a conj 0)
+                               (swap! a conj 1))
+                             @a))
+                         repeatedly
+                         (take n)
+                         frequencies)]
+      (testing "evaluates both branches"
+        (is (= #{[0 1] [1 0]}
+               (set (keys outcomes)))))
+
+      (testing "roughly as often"
+        (->> (vals outcomes)
+             (every? (fn [freq] (<= (Math/abs (double (- freq (/ n 2))))
+                                    (Math/sqrt n))))
+             is))))
+
+  (testing "3 branches"
+    (let [n   100
+          outcomes (->> (fn []
+                          (let [a (atom [])]
+                            (disorderly
+                              (swap! a conj 0)
+                              (swap! a conj 1)
+                              (swap! a conj 2))
+                            @a))
+                        repeatedly
+                        (take n)
+                        frequencies)]
+      (testing "evaluates all branches"
+        (is (= #{[0 1 2] [0 2 1] [1 0 2] [1 2 0] [2 0 1] [2 1 0]}
+               (set (keys outcomes)))))
+
+      (testing "roughly as often"
+        (->> (vals outcomes)
+             (every? (fn [freq]
+                       (<= (Math/abs (double (- freq (/ n 6))))
+                           (Math/sqrt n))))
+             is)))))
+
+
 (deftest fcatch-test
   (let [ex (RuntimeException. "foo")]
     (is (identical? ex ((fcatch #(throw ex)))))))

@@ -2,6 +2,22 @@
   "Unorthodox control flow."
   (:require [clojure.walk :as walk]))
 
+(defmacro disorderly
+  "Like (do), but evaluates expressions in a random order each time. Helpful
+  when you want side effects, but you're not exactly sure how. Returns the
+  result of evaluating the final (e.g. any) branch, because that seems like
+  fun."
+  ([a]
+   a)
+  ([a b]
+   `(if (< (rand) 0.5)
+      (do ~a ~b)
+      (do ~b ~a)))
+  ([a b & more]
+   (let [forms (mapv (fn [form] `(fn [] ~form)) (cons a (cons b more)))]
+     `(doseq [f# (shuffle ~forms)]
+        (f#)))))
+
 (defn fcatch
   "Takes a function and returns a version of it which returns, rather than
   throws, exceptions.

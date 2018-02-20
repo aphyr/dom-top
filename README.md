@@ -10,6 +10,8 @@ examples.
 
 - `fcatch` lifts functions that throw exceptions into functions that *return*
   exceptions.
+- `disorderly` is a `do` block that evaluates statements in a new, random order
+  every time, instead of sequentially.
 - `letr` provides let bindings with early return; particular useful for
   aborting early on failure cases.
 - `bounded-future` is just like `future`, but for CPU-bound tasks.
@@ -26,7 +28,7 @@ Look, this is a judgement-free zone, OK? We all have our reasons.
 
 ## License
 
-Copyright © 2017 Kyle Kingsbury
+Copyright © 2017, 2018 Kyle Kingsbury
 
 Distributed under the Eclipse Public License either version 1.0 or (at
 your option) any later version.
