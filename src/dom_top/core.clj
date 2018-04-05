@@ -2,6 +2,42 @@
   "Unorthodox control flow."
   (:require [clojure.walk :as walk]))
 
+(defmacro assert+
+  "Like Clojure assert, but throws customizable exceptions (by default,
+  IllegalArgumentException), and returns the value it checks, instead of nil.
+
+  Clojure assertions are a little weird. Syntactically, they're a great
+  candidate for runtime validation of state--making sure you got an int instead
+  of a map, or that an object you looked up was present. However, they don't
+  *return* the thing you pass them, which makes it a bit akward to use them in
+  nested expressions. You typically have to do a let binding and then assert.
+  So... let's return truthy values! Now you can
+
+      (assert+ (fetch-person-from-db :liu)
+               \"Couldn't fetch Liu!\")
+
+  Moreover Clojure assertions sensibly throw AssertionError. However,
+  AssertionError is an error that \"should never occur\" and \"a reasonable
+  application should not try to catch.\" There are LOTS of cases where input
+  validation IS something that an application might want to catch and do
+  something sensible with. So we're going to have a variant that throws
+  customizable exceptions.
+
+  Oh, and you can throw maps too. Those become ex-infos.
+
+      (assert+ (thing? that)
+               {:type   :wasn't-a-thing
+                :I'm    [:so :sorry]})"
+  ([x]
+   `(assert+ ~x "Assert failed"))
+  ([x message]
+   `(assert+ ~x IllegalArgumentException ~message))
+  ([x ex-type message]
+   `(or ~x (throw (let [m# ~message]
+                    (if (map? m#)
+                      (ex-info "Assert failed" m#)
+                      (new ~ex-type m#)))))))
+
 (defmacro disorderly
   "This is a chaotic do expression. Like `do`, takes any number of forms. Where
   `do` evaluates forms in order, `disorderly` evaluates them in a random order.
@@ -106,10 +142,14 @@
 
   ... deadlocks, but replacing `pmap` with `real-pmap` works fine."
   [f coll]
-  (->> coll
-       (map (fn launcher [x] (future (f x))))
-       doall
-       (map deref)))
+  (let [futures (mapv (fn launcher [x] (future (f x))) coll)]
+    (try
+      (mapv deref futures)
+      (finally
+        ; Before we return, cancel any incomplete futures and block for their
+        ; completion.
+        (mapv future-cancel futures)
+        (mapv deref futures)))))
 
 (defrecord Retry [bindings])
 

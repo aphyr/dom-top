@@ -3,6 +3,28 @@
             [dom-top.core :refer :all])
   (:import (java.util.concurrent CyclicBarrier)))
 
+(deftest assert+-test
+  (testing "passthrough"
+    (is (= :foo (assert+ :foo)))
+    (is (= :foo (assert+ :foo "failed")))
+    (is (= :foo (assert+ :foo IllegalStateException "failed"))))
+
+  (testing "Default error"
+    (is (thrown-with-msg? IllegalArgumentException #"\AAssert failed\z"
+                          (assert+ false))))
+
+  (testing "Custom message"
+    (is (thrown-with-msg? IllegalArgumentException #"\Ahi\z"
+                          (assert+ false "hi"))))
+
+  (testing "Custom class"
+    (is (thrown-with-msg? RuntimeException #"\AYOU!\?\z"
+                          (assert+ nil RuntimeException "YOU!?"))))
+
+  (testing "Ex-info"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"\AAssert failed"
+                          (assert+ false {:type :frog-blast})))))
+
 (deftest disorderly-test
   (testing "2 branches"
     (let [n         100
@@ -71,7 +93,21 @@
       (is (= (range n) (map first results))))
 
     (testing "counts down correctly"
-      (is (= (range n) (sort (map second results)))))))
+      (is (= (range n) (sort (map second results)))))
+
+    (testing "enforces termination before return"
+      (let [completed (atom [])]
+        (try (real-pmap (fn [dt]
+                          (Thread/sleep dt)
+                          (swap! completed conj dt)
+                          (throw (IllegalStateException. "whoops")))
+                        [0 50])
+             (catch java.util.concurrent.ExecutionException e
+               (assert (= "whoops") (.getMessage (.getCause e)))))
+        (is (= [0] @completed))
+        ; Other thread should have died.
+        (Thread/sleep 100)
+        (is (= [0] @completed))))))
 
 (deftest bounded-pmap-test
   (let [n       1000

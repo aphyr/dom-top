@@ -8,6 +8,8 @@ Available via [clojars](https://clojars.org/dom-top).
 See [dom-top.core](src/dom_top/core.clj) for comprehensive documentation with
 examples.
 
+- `assert+` works like `assert`, but returns truthy values being tested, and
+  throws other types of exceptions (including maps, via ex-info!)
 - `fcatch` lifts functions that throw exceptions into functions that *return*
   exceptions.
 - `disorderly` is a `do` block that evaluates statements in a new, random order
