@@ -16,11 +16,11 @@
       (assert+ (fetch-person-from-db :liu)
                \"Couldn't fetch Liu!\")
 
-  Moreover Clojure assertions sensibly throw AssertionError. However,
+  Moreover, Clojure assertions sensibly throw AssertionError. However,
   AssertionError is an error that \"should never occur\" and \"a reasonable
-  application should not try to catch.\" There are LOTS of cases where input
-  validation IS something that an application might want to catch and do
-  something sensible with. So we're going to have a variant that throws
+  application should not try to catch.\" There are LOTS of cases where you DO
+  expect assertions to fail sometimes and intend to catch them: for instance,
+  validating user input, or bounds checks. So we're going to throw
   customizable exceptions.
 
   Oh, and you can throw maps too. Those become ex-infos.
