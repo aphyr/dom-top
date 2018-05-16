@@ -140,7 +140,12 @@
             b (CyclicBarrier. n)]
         (pmap (fn [i] [i (.await b)]) (range n)))
 
-  ... deadlocks, but replacing `pmap` with `real-pmap` works fine."
+  ... deadlocks, but replacing `pmap` with `real-pmap` works fine.
+
+  Note that every invocation of f *must* terminate: if threads await a barrier,
+  as in this example, but one thread throws an exception before awaiting, the
+  barrier will never release, and real-pmap will deadlock, since not all
+  threads are complete."
   [f coll]
   (let [futures (mapv (fn launcher [x] (future (f x))) coll)]
     (try
