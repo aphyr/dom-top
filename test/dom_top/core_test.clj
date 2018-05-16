@@ -1,5 +1,6 @@
 (ns dom-top.core-test
   (:require [clojure.test :refer :all]
+            [clojure.pprint :refer [pprint]]
             [dom-top.core :refer :all])
   (:import (java.util.concurrent CyclicBarrier)))
 
@@ -109,6 +110,22 @@
         (Thread/sleep 100)
         (is (= [0] @completed))))))
 
+(defn recursive-pmap
+  "Helper for bounded-pmap-test"
+  [depth breadth coll]
+  (if (= depth 0)
+    (reduce + (range 1000000))
+    (bounded-pmap (partial recursive-pmap (dec depth) breadth)
+                  (range breadth))))
+
+(defn recursive-fj-pmap
+  "Helper for bounded-pmap-test"
+  [depth breadth coll]
+  (if (= depth 0)
+    (reduce + (range 1000000))
+    (fj-pmap (partial recursive-fj-pmap (dec depth) breadth)
+             (range breadth))))
+
 (deftest bounded-pmap-test
   (let [n       1000
         threads (atom #{})
@@ -116,12 +133,68 @@
                                 (swap! threads conj (Thread/currentThread))
                                 (- i))
                               (range n))]
-    (testing "Performs transformation preserving order"
+    (testing "performs transformation preserving order"
       (is (= results (map - (range n)))))
 
-    (testing "Bounded concurrency"
+    (testing "bounded concurrency"
       (is (<= (count @threads)
-              (+ 2 (.. Runtime getRuntime availableProcessors)))))))
+              (+ 2 (.. Runtime getRuntime availableProcessors))))))
+
+  ; Imagine a system which can run at most 2 concurrent threads, and an
+  ; execution graph like
+  ;
+  ;     (bounded-pmap (fn [letter]
+  ;                     (bounded-pmap (fn [number]
+  ;                                     [letter number])
+  ;                                   [1 2]))
+  ;                    [:a :b])
+  ;
+  ; If a and b run concurrently, a naive implementation won't have the
+  ; *additional* threads necessary to actually do the work, and this will
+  ; deadlock. Even if it doesn't deadlock, it might run slower than required,
+  ; because some threads are just sitting around waiting for results from
+  ; other threads instead of doing work; in deep graphs on small systems,
+  ; this might add up quick. This test stresses this scenario by generating
+  ; really deep recursive pmap graphs.
+  (testing "doesn't starve recursive call graphs"
+    (let [depth   2
+          breadth 10]
+      (time (doall (flatten (recursive-pmap depth breadth nil)))))))
+
+(deftest fj-pmap-test
+  (let [n       1000
+        threads (atom #{})
+        results (fj-pmap (fn [i]
+                                (swap! threads conj (Thread/currentThread))
+                                (- i))
+                              (range n))]
+    (testing "performs transformation preserving order"
+      (is (= results (map - (range n)))))
+
+    (testing "bounded concurrency"
+      (is (<= (count @threads)
+              (+ 2 (.. Runtime getRuntime availableProcessors))))))
+
+  ; Imagine a system which can run at most 2 concurrent threads, and an
+  ; execution graph like
+  ;
+  ;     (bounded-pmap (fn [letter]
+  ;                     (bounded-pmap (fn [number]
+  ;                                     [letter number])
+  ;                                   [1 2]))
+  ;                    [:a :b])
+  ;
+  ; If a and b run concurrently, a naive implementation won't have the
+  ; *additional* threads necessary to actually do the work, and this will
+  ; deadlock. Even if it doesn't deadlock, it might run slower than required,
+  ; because some threads are just sitting around waiting for results from
+  ; other threads instead of doing work; in deep graphs on small systems,
+  ; this might add up quick. This test stresses this scenario by generating
+  ; really deep recursive pmap graphs.
+  (testing "doesn't starve recursive call graphs"
+    (let [depth   2
+          breadth 10]
+      (time (doall (flatten (recursive-fj-pmap depth breadth nil)))))))
 
 (deftest with-retry-test
   (testing "no bindings"

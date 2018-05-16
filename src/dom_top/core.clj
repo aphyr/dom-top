@@ -1,6 +1,7 @@
 (ns dom-top.core
   "Unorthodox control flow."
-  (:require [clojure.walk :as walk]))
+  (:require [clojure.walk :as walk])
+  (:import (java.util.concurrent ForkJoinTask)))
 
 (defmacro assert+
   "Like Clojure assert, but throws customizable exceptions (by default,
@@ -129,6 +130,19 @@
        (map (fn launcher [x] (bounded-future (f x))))
        doall
        (map deref)))
+
+(defn fj-pmap
+  "Like pmap, but uses the forkjoin executor service. Ideal for computationally
+  bound tasks, especially when you might want to, say, pmap *inside* each of
+  several parallel tasks without spawning eight gazillion threads. May use
+  threads more efficiently for cpu-bound recursive call graphs."
+  [f coll]
+  (->> coll
+       (mapv (fn [x] (ForkJoinTask/adapt ^Callable (fn wrapper [] (f x)))))
+       ForkJoinTask/invokeAll
+       ; InvokeAll spawns tasks in reverse order, so gets are most efficiently
+       ; done in forwards order
+       (map (fn [^ForkJoinTask t] (.join t)))))
 
 (defn real-pmap
   "Like pmap, but spawns tasks immediately, and launches futures instead of
