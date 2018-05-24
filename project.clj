@@ -1,5 +1,5 @@
-(defproject dom-top "1.0.3-SNAPSHOT"
-  :description "Unorthodox control flow"
+(defproject dom-top "1.0.3"
+  :description "Unorthodox control flow for Clojurists with masochistic sensibilities"
   :url "http://github.com/aphyr/dom-top"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
