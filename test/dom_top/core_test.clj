@@ -93,21 +93,31 @@
       (is (= (range n) (map first results))))
 
     (testing "counts down correctly"
-      (is (= (range n) (sort (map second results)))))
+      (is (= (range n) (sort (map second results))))))
 
-    (testing "enforces termination before return"
-      (let [completed (atom [])]
-        (try (real-pmap (fn [dt]
-                          (Thread/sleep dt)
-                          (swap! completed conj dt)
-                          (throw (IllegalStateException. "whoops")))
-                        [0 50])
-             (catch java.util.concurrent.ExecutionException e
-               (assert (= "whoops") (.getMessage (.getCause e)))))
-        (is (= [0] @completed))
-        ; Other thread should have died.
-        (Thread/sleep 100)
-        (is (= [0] @completed))))))
+  (testing "enforces termination before return"
+    (let [completed (atom [])]
+      (try (real-pmap (fn [dt]
+                        (Thread/sleep dt)
+                        (swap! completed conj dt)
+                        (throw (IllegalStateException. "whoops")))
+                      [50 0])
+           (catch IllegalStateException e
+             (assert (= "whoops") (.getMessage (.getCause e)))))
+      (is (= [0] @completed))
+      ; Other thread should have died.
+      (Thread/sleep 100)
+      (is (= [0] @completed))))
+
+  (testing "doesn't deadlock"
+    (let [n 6
+          b (CyclicBarrier. n)]
+      (is (thrown-with-msg? RuntimeException #"Agh!"
+                            (real-pmap (fn [i]
+                                         (when (= i (dec n))
+                                           (throw (RuntimeException. "Agh!")))
+                                         (.await b))
+                                       (range n)))))))
 
 (deftest bounded-pmap-test
   (let [n       1000

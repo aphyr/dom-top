@@ -131,10 +131,10 @@
        (map deref)))
 
 (defn real-pmap
-  "Like pmap, but spawns tasks immediately, and launches futures instead of
-  using a bounded threadpool. Useful when your tasks might block on each other,
-  and you don't want to deadlock by exhausting the default clojure worker
-  threadpool halfway through the collection. For instance,
+  "Like pmap, but spawns tasks immediately, and launches real Threads instead
+  of using a bounded threadpool. Useful when your tasks might block on each
+  other, and you don't want to deadlock by exhausting the default clojure
+  worker threadpool halfway through the collection. For instance,
 
       (let [n 1000
             b (CyclicBarrier. n)]
@@ -142,19 +142,85 @@
 
   ... deadlocks, but replacing `pmap` with `real-pmap` works fine.
 
-  Note that every invocation of f *must* terminate: if threads await a barrier,
-  as in this example, but one thread throws an exception before awaiting, the
-  barrier will never release, and real-pmap will deadlock, since not all
-  threads are complete."
+  If any thread throws an exception, all mapping threads are interrupted, and
+  the original exception is rethrown. Note that we do not include a
+  ConcurrentExecutionException wrapper. This prevents deadlock issues where
+  mapping threads synchronize on some resource (like a cyclicbarrier or
+  countdownlatch), but one crashes, causing other threads to block indefinitely
+  on the barrier.
+
+  All pmap threads should terminate before real-pmap returns or throws. This
+  prevents race conditions where mapping threads continue doing work
+  concurrently with, say, clean-up code intended to run after the call to
+  (pmap).
+
+  If the thread calling (pmap) itself is interrupted, all bets are off."
   [f coll]
-  (let [futures (mapv (fn launcher [x] (future (f x))) coll)]
-    (try
-      (mapv deref futures)
-      (finally
-        ; Before we return, cancel any incomplete futures and block for their
-        ; completion.
-        (mapv future-cancel futures)
-        (mapv deref futures)))))
+  (let [exception     (promise)
+        thread-group  (ThreadGroup. "real-pmap-with-early-abort")
+        results       (vec (take (count coll) (repeatedly promise)))
+        threads (mapv (fn build-thread [i x result]
+                        (Thread.
+                          thread-group
+                          (bound-fn []
+                            (try (deliver result (f x))
+                                 (catch Throwable t
+                                   ; Note that we're not necessarily guaranteed
+                                   ; to execute this code. If our call of (f x)
+                                   ; throws, we could wind up here, and then
+                                   ; another thread with a failure could
+                                   ; interrupt us, causing us to jump out of
+                                   ; this catch block. However, so long as
+                                   ; nobody *outside* this thread group
+                                   ; interrupts us, the first interrupt (or any
+                                   ; throwable) we get from calling (f x) will
+                                   ; be stored in `exception`. If someone
+                                   ; outside this thread group interrupts us,
+                                   ; chances are it was via interrupting the
+                                   ; coordinator thread, and that has its own
+                                   ; mechanism for cleaning up and throwing.
+                                   (deliver exception t)
+                                   (.interrupt thread-group))))
+                          (str "real-pmap " i)))
+                      (range)
+                      coll
+                      results)]
+    ; Launch threads
+    (doseq [^Thread t threads] (.start t))
+
+    ; Wait for completion. Normally I'd await a barrier, but because of the way
+    ; we interrupt threads, I don't think there's any point where we *could*
+    ; update a barrier safely. What we *can* do reliably, though, is join the
+    ; thread. That can throw InterruptedException, so we catch that, check that
+    ; it's really dead, and if so, move on. If we get interrupted and the
+    ; thread *isn't* dead, then it's probably that someone interrupted this
+    ; real-pmap-with-early-abort call, rather than the underlying thread, and
+    ; we interrupt the thread group (just in case), and rethrow our own
+    ; interrupt.
+    (doseq [^Thread t threads]
+      (try
+        (.join t)
+        (catch InterruptedException e
+          (when (.isAlive t)
+            ; We were interrupted by an outside force, not the thread we
+            ; were joining. Clean up our thread group and rethrow.
+            (.interrupt thread-group)
+            (throw e)))))
+
+    ; OK, all threads are now dead. If any observed an exception, throw that.
+    (when (realized? exception)
+      (throw @exception))
+
+    ; At this point results SHOULD contain an entry for every thread. However,
+    ; it may have been the case that a thread caught an exception, then an
+    ; outside force interrupted that thread *before* it was able to store the
+    ; exception, which would mean that we'd have an undelivered promise here.
+    ; In the event that that happens, we throw a special IllegalStateException.
+    (mapv (fn [result]
+            (if (realized? result)
+              @result
+              (throw (IllegalStateException. "A real-pmap-with-early-abort worker thread crashed *during* exception handling and was unable to record what that exception was."))))
+          results)))
 
 (defrecord Retry [bindings])
 
