@@ -130,34 +130,14 @@
        doall
        (map deref)))
 
-(defn real-pmap
-  "Like pmap, but spawns tasks immediately, and launches real Threads instead
-  of using a bounded threadpool. Useful when your tasks might block on each
-  other, and you don't want to deadlock by exhausting the default clojure
-  worker threadpool halfway through the collection. For instance,
-
-      (let [n 1000
-            b (CyclicBarrier. n)]
-        (pmap (fn [i] [i (.await b)]) (range n)))
-
-  ... deadlocks, but replacing `pmap` with `real-pmap` works fine.
-
-  If any thread throws an exception, all mapping threads are interrupted, and
-  the original exception is rethrown. Note that we do not include a
-  ConcurrentExecutionException wrapper. This prevents deadlock issues where
-  mapping threads synchronize on some resource (like a cyclicbarrier or
-  countdownlatch), but one crashes, causing other threads to block indefinitely
-  on the barrier.
-
-  All pmap threads should terminate before real-pmap returns or throws. This
-  prevents race conditions where mapping threads continue doing work
-  concurrently with, say, clean-up code intended to run after the call to
-  (pmap).
-
-  If the thread calling (pmap) itself is interrupted, all bets are off."
+(defn real-pmap-helper
+  "Helper for real-pmap. Maps f over coll, collecting results and exceptions.
+  Returns a tuple of [results, exceptions], where results is a sequence of
+  results from calling `f` on each element (`nil` if f throws); and exceptions
+  is a sequence of exceptions thrown by f, in roughly time order."
   [f coll]
-  (let [exception     (promise)
-        thread-group  (ThreadGroup. "real-pmap-with-early-abort")
+  (let [exceptions    (atom [])
+        thread-group  (ThreadGroup. "real-pmap")
         results       (vec (take (count coll) (repeatedly promise)))
         threads (mapv (fn build-thread [i x result]
                         (Thread.
@@ -179,7 +159,7 @@
                                    ; chances are it was via interrupting the
                                    ; coordinator thread, and that has its own
                                    ; mechanism for cleaning up and throwing.
-                                   (deliver exception t)
+                                   (swap! exceptions conj t)
                                    (.interrupt thread-group))))
                           (str "real-pmap " i)))
                       (range)
@@ -194,7 +174,7 @@
     ; thread. That can throw InterruptedException, so we catch that, check that
     ; it's really dead, and if so, move on. If we get interrupted and the
     ; thread *isn't* dead, then it's probably that someone interrupted this
-    ; real-pmap-with-early-abort call, rather than the underlying thread, and
+    ; real-pmap call, rather than the underlying thread, and
     ; we interrupt the thread group (just in case), and rethrow our own
     ; interrupt.
     (doseq [^Thread t threads]
@@ -207,20 +187,53 @@
             (.interrupt thread-group)
             (throw e)))))
 
-    ; OK, all threads are now dead. If any observed an exception, throw that.
-    (when (realized? exception)
-      (throw @exception))
+    ; OK, all threads are now dead. Return!
+    [(mapv (fn [result]
+             (if (realized? result)
+               @result
+               (if (seq @exceptions)
+                 ; OK, we know what might have caused this.
+                 ::crashed
+                 ; Oh shoot, we actually have NO exceptions recorded, which
+                 ; might have happened if a thread caught an exception, then
+                 ; was interrupted before it could store that exception's cause
+                 ; in the exceptions atom. In that case, we'll throw an
+                 ; IllegalStateException here.
+                 (throw (IllegalStateException. "A real-pmap worker thread crashed *during* exception handling and was unable to record what that exception was.")))))
+           results)
+     @exceptions]))
 
-    ; At this point results SHOULD contain an entry for every thread. However,
-    ; it may have been the case that a thread caught an exception, then an
-    ; outside force interrupted that thread *before* it was able to store the
-    ; exception, which would mean that we'd have an undelivered promise here.
-    ; In the event that that happens, we throw a special IllegalStateException.
-    (mapv (fn [result]
-            (if (realized? result)
-              @result
-              (throw (IllegalStateException. "A real-pmap-with-early-abort worker thread crashed *during* exception handling and was unable to record what that exception was."))))
-          results)))
+(defn real-pmap
+  "Like pmap, but spawns tasks immediately, and launches real Threads instead
+  of using a bounded threadpool. Useful when your tasks might block on each
+  other, and you don't want to deadlock by exhausting the default clojure
+  worker threadpool halfway through the collection. For instance,
+
+      (let [n 1000
+            b (CyclicBarrier. n)]
+        (pmap (fn [i] [i (.await b)]) (range n)))
+
+  ... deadlocks, but replacing `pmap` with `real-pmap` works fine.
+
+  If any thread throws an exception, all mapping threads are interrupted, and
+  the original exception is rethrown. This prevents deadlock issues where
+  mapping threads synchronize on some resource (like a cyclicbarrier or
+  countdownlatch), but one crashes, causing other threads to block indefinitely
+  on the barrier. Note that we do not include a ConcurrentExecutionException
+  wrapper.
+
+  All pmap threads should terminate before real-pmap returns or throws. This
+  prevents race conditions where mapping threads continue doing work
+  concurrently with, say, clean-up code intended to run after the call to
+  (pmap).
+
+  If the thread calling (pmap) itself is interrupted, all bets are off."
+  [f coll]
+  (let [[results exceptions] (real-pmap-helper f coll)]
+    (when (seq exceptions)
+      ; We'll take the first one as our canonical exception.
+      (throw (first exceptions)))
+    results))
 
 (defrecord Retry [bindings])
 
