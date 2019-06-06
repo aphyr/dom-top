@@ -1,7 +1,8 @@
 (ns dom-top.core-test
   (:require [clojure.test :refer :all]
             [dom-top.core :refer :all])
-  (:import (java.util.concurrent CyclicBarrier)))
+  (:import (java.util.concurrent BrokenBarrierException
+                                 CyclicBarrier)))
 
 (deftest assert+-test
   (testing "passthrough"
@@ -84,6 +85,18 @@
 (deftest fcatch-test
   (let [ex (RuntimeException. "foo")]
     (is (identical? ex ((fcatch #(throw ex)))))))
+
+(deftest real-pmap-helper-test
+  (testing "catches exceptions"
+    (let [res (real-pmap-helper (fn [x]
+                              (when (= x 0)
+                                (throw (RuntimeException. "hi")))
+
+                              (throw (BrokenBarrierException. "augh")))
+                            (range 5))]
+      (is (= (repeat 5 :dom-top.core/crashed) (first res)))
+      (is (= (cons java.lang.RuntimeException (repeat 4 BrokenBarrierException))
+             (map class (second res)))))))
 
 (deftest real-pmap-test
   (let [n 1000
