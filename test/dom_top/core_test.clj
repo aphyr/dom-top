@@ -90,13 +90,15 @@
   (testing "catches exceptions"
     (let [res (real-pmap-helper (fn [x]
                               (when (= x 0)
+                                (Thread/sleep 5)
                                 (throw (RuntimeException. "hi")))
 
                               (throw (BrokenBarrierException. "augh")))
                             (range 5))]
       (is (= (repeat 5 :dom-top.core/crashed) (first res)))
-      (is (= (cons java.lang.RuntimeException (repeat 4 BrokenBarrierException))
-             (map class (second res)))))))
+      (is (= {BrokenBarrierException 4
+              InterruptedException 1}
+             (frequencies (map class (second res))))))))
 
 (deftest real-pmap-test
   (let [n 1000
