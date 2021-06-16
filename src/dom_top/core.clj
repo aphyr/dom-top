@@ -1,6 +1,7 @@
 (ns dom-top.core
   "Unorthodox control flow."
-  (:require [clojure.walk :as walk]))
+  (:require [clojure.pprint :refer [pprint]]
+            [clojure.walk :as walk]))
 
 (defmacro assert+
   "Like Clojure assert, but throws customizable exceptions (by default,
@@ -35,7 +36,9 @@
   ([x ex-type message]
    `(or ~x (throw (let [m# ~message]
                     (if (map? m#)
-                      (ex-info "Assert failed" m#)
+                      (ex-info (str "Assert failed:\n"
+                                   (with-out-str (pprint m#)))
+                               m#)
                       (new ~ex-type m#)))))))
 
 (defmacro disorderly

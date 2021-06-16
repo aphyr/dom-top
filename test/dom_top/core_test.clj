@@ -23,7 +23,7 @@
                           (assert+ nil RuntimeException "YOU!?"))))
 
   (testing "Ex-info"
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"\AAssert failed"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"\AAssert failed:\n\{:type :frog-blast\}"
                           (assert+ false {:type :frog-blast})))))
 
 (deftest disorderly-test
