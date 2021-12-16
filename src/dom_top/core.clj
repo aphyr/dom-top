@@ -39,7 +39,7 @@
                       (ex-info (str "Assert failed:\n"
                                    (with-out-str (pprint m#)))
                                m#)
-                      (new ~ex-type m#)))))))
+                      (new ~ex-type ^String m#)))))))
 
 (defmacro disorderly
   "This is a chaotic do expression. Like `do`, takes any number of forms. Where
