@@ -1,7 +1,10 @@
 (ns dom-top.core
   "Unorthodox control flow."
   (:require [clojure.pprint :refer [pprint]]
-            [clojure.walk :as walk]))
+            [clojure.walk :as walk]
+            [riddley.walk :refer [walk-exprs]])
+  (:import (java.lang Iterable)
+           (java.util Iterator)))
 
 (defmacro assert+
   "Like Clojure assert, but throws customizable exceptions (by default,
@@ -403,3 +406,228 @@
   (assert (even? (count bindings)))
   (let [groups (letr-partition-bindings bindings)]
     (letr-let-if (letr-partition-bindings bindings) body)))
+
+(declare loopr-helper)
+
+(defn loopr-iterator
+  "Like loopr, specialized for traversal using a mutable iterator. Builds a
+  form which returns a single accumulator, or a vector of accumulators, after
+  traversing each x in xs (and more element bindings within)."
+  [accumulator-bindings [{:keys [lhs rhs] :as eb} & more-element-bindings] body]
+  (let [accs (map first (partition 2 accumulator-bindings))
+        bname (:name eb)
+        iter (gensym (str bname "-iter-"))
+        res  (gensym (str bname "-res-"))
+        single-acc? (< (count accs) 2)
+        rhs  (vary-meta rhs assoc :tag `Iterable)]
+    `(let [~iter ^Iterator (.iterator ~rhs)]
+       ; Bind each accumulator to itself initially
+       (loop [~@(mapcat (juxt identity identity) accs)]
+         (if-not (.hasNext ~iter)
+           ~(if single-acc?
+              (first accs)
+              `[~@accs])
+           (let [~lhs (.next ~iter)]
+             ~(if more-element-bindings
+                ; More iteration to do within. Descend, come back, recur.
+                `(let [~res ~(loopr-helper accumulator-bindings
+                                             more-element-bindings
+                                             body)]
+                   (recur ~@(if single-acc?
+                              [res]
+                              (map-indexed (fn [i acc] `(nth ~res ~i)) accs))))
+                ; This is the deepest level; use body directly. It'll contain a
+                ; compatible recur form.
+                body)))))))
+
+(defn loopr-reduce
+  "Like loopr, specialized for traversal using `reduce`. Builds a form which
+  returns a single accumulator, or a vector of accumulators, after traversing
+  each x in xs (and more element bindings within). Reduce is often faster over
+  Clojure data structures than a raw iterator."
+  [accumulator-bindings [{:keys [lhs rhs] :as eb} & more-element-bindings] body]
+  (let [accs (map first (partition 2 accumulator-bindings))
+        single-acc? (< (count accs) 2)
+        res  (gensym (str (:name eb) "-res-"))
+        acc  (if single-acc?
+               (first accs)
+               (vec accs))]
+    `(reduce (fn ~(gensym (symbol (str "reduce-" (:name eb) "-"))) [~acc ~lhs]
+               ~(if more-element-bindings
+                  ; More iteration!
+                  (loopr-helper accumulator-bindings
+                                  more-element-bindings
+                                  body)
+                  ; This is the deepest level. Rewrite body to replace (recur
+                  ; ...) with [...] or ..., depending on single-acc.
+                  (letfn [(xform [[f :as form]]
+                            (cond (or (= f 'fn*)
+                                      (= f 'loop*))
+                                  ; Stop traversal! We don't want to
+                                  ; descend into nested recur targets
+                                  form
+
+                                  (= f 'recur)
+                                  (let [form' (map (partial walk-exprs
+                                                            seq? xform)
+                                                   form)]
+                                    (if single-acc?
+                                      (do (assert (= 1 (count (rest form))))
+                                          (first (rest form')))
+                                      (vec (rest form'))))
+
+                                  :else
+                                  (map (partial walk-exprs seq? xform) form)))]
+                    (walk-exprs seq? xform body))))
+             ~acc
+             ~rhs)))
+
+(defn loopr-helper
+  "Helper for building each stage of a nested loopr. Takes an accumulator
+  binding vector, a vector of element bindings maps {:lhs, :rhs, :name}, and
+  body expression."
+  [accumulator-bindings element-bindings body]
+  (if (empty? element-bindings)
+    ; Done!
+    body
+    ; Generate an iterator loop around the top-level element bindings.
+    (let [strategy (case (:via (first element-bindings))
+                     :iterator loopr-iterator
+                     :reduce   loopr-reduce
+                     ; With multiple accumulators, vector destructuring can
+                     ; make reduce more expensive.
+                     (if (< 2 (count accumulator-bindings))
+                       loopr-iterator
+                       ; With single accumulators, Clojure's internal reduce is
+                       ; usually more efficient
+                       loopr-reduce))]
+      (strategy accumulator-bindings element-bindings body))))
+
+(defmacro loopr
+  "Like `loop`, but for reducing over (possibly nested) collections. Compared to
+  `loop`, makes iteration implicit. Compared to reduce, eliminates the need for
+  nested reductions, fn wrappers, and destructuring multiple accumulators.
+  Compared to `for`, loopr is eager, and lets you carry accumulators.
+
+  Takes an initial binding vector for accumulator variables, (like `loop`);
+  then a binding vector of loop variables to collections (like `for`); then a
+  body, then an optional final expression. Iterates over each element of the
+  collections, like `for` would, and evaluates body with that combination of
+  elements bound. The body should always contain one or more (recur ...) forms
+  with new values for each accumulator. When the loop completes normally,
+  loopr returns the value of the final expression, or the sole accumulator
+  value if there is only one, or a vector of accumulator values if there were
+  multiple. For example:
+
+    (loopr [sum 0]
+           [x [1 2 3]]
+      (recur (+ sum x)))
+
+  returns 6: the sum of 1, 2 and 3.
+
+  This would typically be written as `(reduce + [1 2 3])`, and for single
+  accumulators or single loops using `reduce` or `loop` is often more concise.
+  Loopred's power comes from its ability to carry multiple accumulators and to
+  traverse multiple dimensions. For instance, to get the mean of all elements
+  in a matrix:
+
+    (loopr [count 0
+            sum   0]
+           [row [[1 2 3] [4 5 6] [7 8 9]]
+            x   row]
+      (recur (inc count) (+ sum x))
+      (/ sum count))
+    ; returns 45/9 = 5
+
+  Here, we have a body which recurs, and a final expression `(/ sum count)`,
+  which is evaluated with the final value of the accumulators. Compare this to
+  the equivalent nested reduce:
+
+    (let [[sum count] (reduce (fn [[count sum] row]
+                                (reduce (fn [[count sum] x]
+                                          [(inc count) (+ sum x)])
+                                        [count sum]
+                                        row))
+                              [0 0]
+                              [[1 2 3] [4 5 6] [7 8 9]])]
+      (/ sum count))
+
+  This requires an enclosing `let` binding to transform the loop results, two
+  calls to reduce, each with their own function, creating and destructuring
+  vectors at each level, and keeping track of accumulator initial values far
+  from their point of use. The structure of accumulators is encoded in five
+  places instead of two, which makes it harder to change accumulators later.
+  It also requires deeper indentation. Here's the same loop expressed as a
+  flat `loop` over seqs:
+
+    (loop [count 0
+           sum   0
+           rows  [[1 2 3] [4 5 6] [7 8 9]]
+           row   (first rows)]
+      (if-not (seq rows)
+        (/ sum count)       ; Done with iteration
+        (if-not (seq row)   ; Done with row; move on to next row
+          (recur count sum (next rows) (first (next rows)))
+          (let [[x & row'] row]
+            (recur (inc count) (+ sum x) rows row')))))
+
+  This version is less indented but also considerably longer, and the
+  interweaving of traversal machinery and accumulation logic makes it
+  difficult to understand. It is also significantly slower than the nested
+  `reduce`, on account of seq allocation--vectors can more efficiently reduce
+  over their internal structure.
+
+  Depending on how many accumulators are at play, and which data structures are
+  being traversed, it may be faster to use `loop` with an iterator or `reduce`
+  with a function. loopr compiles to (possibly nested) `reduce` when given a
+  single accumulator, and to (possibly nested) `loop` with mutable iterators
+  when given multiple accumulators. You can also control the iteration tactic
+  for each collection explicitly:
+
+    (loopr [count 0
+            sum   0]
+           [row [[1 2 3] [4 5 6] [7 8 9]] :via :reduce
+            x   row                       :via :iterator]
+      (recur (inc count) (+ sum x))
+      (/ sum count))
+
+  This compiles into a `reduce` over rows, and a `loop` over each row using an
+  iterator."
+  [accumulator-bindings element-bindings body & [final]]
+  (assert (<= 2 (count accumulator-bindings))) ; TODO: add support for no accs
+  (assert (<= 2 (count element-bindings))) ; TODO: determine semantics for this?
+  (assert (even? (count accumulator-bindings)))
+  (assert (even? (count element-bindings)))
+  ; Parse element bindings into a vector of maps
+  (let [element-bindings
+        (loop [forms     element-bindings
+               bindings  []]
+          (if-not (seq forms)
+            bindings
+            (let [[f1 f2 & fs] forms
+                  i (count bindings)]
+              (if (keyword? f1)
+                ; Options for last binding
+                (case f1
+                  :via (recur fs (update bindings (dec i) assoc :via f2))
+                  (throw (IllegalArgumentException.
+                           (str "Unrecognized element binding option: "
+                                (pr-str f1)
+                                " - expected :via"))))
+                ; New binding
+                (let [; Choose a friendly name for this binding.
+                      binding-name (if (symbol? f1)
+                                     f1
+                                     (symbol (str "iter-" i)))
+                      binding {:name binding-name
+                               :lhs  f1
+                               :rhs  f2}]
+                  (recur fs (conj bindings binding)))))))
+        acc-names   (map first (partition 2 accumulator-bindings))
+        single-acc? (< (count acc-names) 2)
+        acc         (if single-acc?
+                      (first acc-names)
+                      (vec acc-names))]
+    `(let [~@accumulator-bindings
+           ~acc ~(loopr-helper accumulator-bindings element-bindings body)]
+       ~(or final acc))))

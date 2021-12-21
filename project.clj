@@ -3,4 +3,9 @@
   :url "http://github.com/aphyr/dom-top"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
-  :profiles {:dev {:dependencies [[org.clojure/clojure "1.9.0"]]}})
+  :dependencies [[riddley "0.2.0"] ; For code-walking
+                 ]
+  :profiles {:dev {:dependencies [[org.clojure/clojure "1.10.3"]
+                                  [criterium "0.4.6"]]}}
+  :test-selectors {:perf :perf
+                   :default (fn [m] (not (or (:perf m))))})
