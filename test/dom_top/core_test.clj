@@ -297,8 +297,71 @@
                                      (if (= i 0)
                                        sum
                                        (recur (dec i))))
-                                   (powersum x 0))))))))
-    ))
+                                   (powersum x 0)))))))))
+
+  (testing "early return"
+    ; Find a value and its index
+    (is (= {:x 3, :i 1}
+           (loopr [i 0]
+                  [x [1 3 2] :via :reduce]
+                  (if (= x 3)
+                    {:x x, :i i}
+                    (recur (inc i))))
+           (loopr [i 0]
+                  [x [1 3 2] :via :iterator]
+                  (if (= x 3)
+                    {:x x, :i i}
+                    (recur (inc i))))))
+    (testing "nested"
+      (let [pairs [[1 2] [3 4] [5 6]]]
+        (is (= {:x 3, :i 2}
+               (loopr [i 0]
+                      [pair pairs :via :reduce
+                       x    pair  :via :reduce]
+                      (if (= x 3)
+                        {:x x, :i i}
+                        (recur (inc i))))
+               (loopr [i 0]
+                      [pair pairs :via :reduce
+                       x    pair  :via :iterator]
+                      (if (= x 3)
+                        {:x x, :i i}
+                        (recur (inc i))))
+               (loopr [i 0]
+                      [pair pairs :via :iterator
+                       x    pair  :via :reduce]
+                      (if (= x 3)
+                        {:x x, :i i}
+                        (recur (inc i))))
+               (loopr [i 0]
+                      [pair pairs :via :iterator
+                       x    pair  :via :iterator]
+                      (if (= x 3)
+                        {:x x, :i i}
+                        (recur (inc i))))
+               ))))))
+
+(deftest rewrite-tails-test
+  (is (= 2 (rewrite-tails inc '1)))
+  (is (= '(do 1 2)
+         (rewrite-tails inc '(do 1 1))))
+  (is (= '(do (do 1 2))
+         (rewrite-tails inc '(do (do 1 1)))))
+
+  (let [inc* #(if (number? %) (inc %) %)]
+    (is (= '(loop* [x 0] (recur 1))
+           (rewrite-tails inc* '(loop [x 0] (recur 1)))))
+    (is (= '(if 3 2 nil)
+           (rewrite-tails inc* '(if 3 1))))
+    (is (= '(if 3 (do 1 1 2) nil)
+           (rewrite-tails inc* '(when 3 1 1 1))))
+    (is (= '(if (even? x) (do 1 2) (do 1 3))
+           (rewrite-tails inc* '(if (even? x) (do 1 1) (do 1 2)))))
+    ; Hard to check this because the case* expands into a weird gensym thing.
+    (let [form (rewrite-tails inc* '(case x :one 1, :two 2, 3))]
+      (is (= 2 (eval `(let [~'x :one] ~form))))
+      (is (= 3 (eval `(let [~'x :two] ~form))))
+      (is (= 4 (eval `(let [~'x :default] ~form)))))))
 
 (deftest ^:perf loopr-perf-test
   (let [bigvec   (->> (range 10000) vec)

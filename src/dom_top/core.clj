@@ -2,7 +2,7 @@
   "Unorthodox control flow."
   (:require [clojure.pprint :refer [pprint]]
             [clojure.walk :as walk]
-            [riddley.walk :refer [walk-exprs]])
+            [riddley.walk :refer [macroexpand-all walk-exprs]])
   (:import (java.lang Iterable)
            (java.util Iterator)))
 
@@ -276,7 +276,14 @@
                               (range bindings-count)))
            ~retval)))))
 
-(deftype Return [value])
+(deftype Return [value]
+  Object
+  (toString [this]
+    (str "(Return. " (pr-str value) ")")))
+
+(defmethod print-method Return
+  [^Return ret ^java.io.Writer w]
+  (.write w (.toString ret)))
 
 (defn letr-rewrite-return
   "Rewrites (return x) to (Return. x) in expr. Returns a pair of [changed?
@@ -407,6 +414,36 @@
   (let [groups (letr-partition-bindings bindings)]
     (letr-let-if (letr-partition-bindings bindings) body)))
 
+(defn rewrite-tails*
+  "Helper for rewrite-tails which doesn't macroexpand."
+  [f form]
+  (if-not (seq? form)
+    (f form)
+    (case (first form)
+      (do let* letfn*)
+      (list* (concat (butlast form) [(rewrite-tails* f (last form))]))
+
+      if
+      (let [[_ test t-branch f-branch] form]
+        (list 'if test (rewrite-tails* f t-branch) (rewrite-tails* f f-branch)))
+
+      case*
+      (let [[a b c d default clauses & more] form]
+        (list* a b c d (rewrite-tails* f default)
+               (->> clauses
+                    (map (fn [[index [test expr]]]
+                           [index [test (rewrite-tails* f expr)]]))
+                    (into (sorted-map)))
+               more))
+
+      (f form))))
+
+(defn rewrite-tails
+  "Takes a Clojure form and invokes f on each of its tail forms--the final
+  expression in a do or let, both branches of an if, values of a case, etc."
+  [f form]
+  (rewrite-tails* f (macroexpand-all form)))
+
 (declare loopr-helper)
 
 (defn loopr-iterator
@@ -433,12 +470,22 @@
                 `(let [~res ~(loopr-helper accumulator-bindings
                                              more-element-bindings
                                              body)]
-                   (recur ~@(if single-acc?
-                              [res]
-                              (map-indexed (fn [i acc] `(nth ~res ~i)) accs))))
+                   (if (instance? Return ~res)
+                     ; Early return!
+                     ~res
+                     (recur ~@(if single-acc?
+                                [res]
+                                (map-indexed (fn [i acc] `(nth ~res ~i))
+                                             accs)))))
                 ; This is the deepest level; use body directly. It'll contain a
-                ; compatible recur form.
-                body)))))))
+                ; compatible recur form. We need to rewrite the body:
+                ; (recur x y) -> (recur x y)
+                ; x           -> (Return. x)
+                (rewrite-tails (fn rewrite-tail [form]
+                                 (if (and (seq? form) (= 'recur (first form)))
+                                   form
+                                   `(Return. ~form)))
+                                 body))))))))
 
 (defn loopr-reduce
   "Like loopr, specialized for traversal using `reduce`. Builds a form which
@@ -452,33 +499,32 @@
         acc  (if single-acc?
                (first accs)
                (vec accs))]
-    `(reduce (fn ~(gensym (symbol (str "reduce-" (:name eb) "-"))) [~acc ~lhs]
+    `(reduce (fn ~(symbol (str "reduce-" (:name eb))) [~acc ~lhs]
                ~(if more-element-bindings
                   ; More iteration!
-                  (loopr-helper accumulator-bindings
-                                  more-element-bindings
-                                  body)
-                  ; This is the deepest level. Rewrite body to replace (recur
-                  ; ...) with [...] or ..., depending on single-acc.
-                  (letfn [(xform [[f :as form]]
-                            (cond (or (= f 'fn*)
-                                      (= f 'loop*))
-                                  ; Stop traversal! We don't want to
-                                  ; descend into nested recur targets
-                                  form
-
-                                  (= f 'recur)
-                                  (let [form' (map (partial walk-exprs
-                                                            seq? xform)
-                                                   form)]
-                                    (if single-acc?
-                                      (do (assert (= 1 (count (rest form))))
-                                          (first (rest form')))
-                                      (vec (rest form'))))
-
-                                  :else
-                                  (map (partial walk-exprs seq? xform) form)))]
-                    (walk-exprs seq? xform body))))
+                  `(let [res# ~(loopr-helper accumulator-bindings
+                                             more-element-bindings
+                                             body)]
+                    ; Early return?
+                    (if (instance? Return res#)
+                      (reduced res#)
+                      res#))
+                  ; This is the deepest level. Rewrite body to replace terminal
+                  ; expressions:
+                  ; (recur x)   -> x
+                  ; (recur x y) -> [x y]
+                  ; x           -> (reduced (Return. x))
+                  (rewrite-tails
+                    (fn rewrite-tail [form]
+                      (if (and (seq? form) (= 'recur (first form)))
+                        ; Recur
+                        (if single-acc?
+                          (do (assert (= 1 (count (rest form))))
+                              (first (rest form)))
+                          (vec (rest form)))
+                        ; Early return
+                        `(reduced (Return. ~form))))
+                    body)))
              ~acc
              ~rhs)))
 
@@ -592,7 +638,18 @@
       (/ sum count))
 
   This compiles into a `reduce` over rows, and a `loop` over each row using an
-  iterator."
+  iterator.
+
+  Like `loop`, `loopr` supports early return. Any non `(recur ...)` form in
+  tail position in the body is returned immediately. To search for the first
+  odd number in collection, returning that number and its index:
+
+    (loopr [i 0]
+           [x [0 5 2 3]]
+           (if (odd? x)
+             {:i i, :x x}
+             (recur (inc i))))
+  "
   [accumulator-bindings element-bindings body & [final]]
   (assert (<= 2 (count accumulator-bindings))) ; TODO: add support for no accs
   (assert (<= 2 (count element-bindings))) ; TODO: determine semantics for this?
@@ -630,4 +687,6 @@
                       (vec acc-names))]
     `(let [~@accumulator-bindings
            ~acc ~(loopr-helper accumulator-bindings element-bindings body)]
-       ~(or final acc))))
+       (if (instance? Return ~acc)
+         (.value ~acc)
+         ~(or final acc)))))
