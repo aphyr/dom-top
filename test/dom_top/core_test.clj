@@ -339,7 +339,47 @@
                       (if (= x 3)
                         {:x x, :i i}
                         (recur (inc i))))
-               ))))))
+               )))))
+
+  (testing "no accumulator"
+    (testing "reduce"
+      (let [acc (atom [])
+            xs  [1 2 3]]
+        (is (= nil
+               (loopr []
+                      [x xs :via :reduce]
+                      (do (swap! acc conj x)
+                          (recur)))))
+        (is (= [1 2 3] @acc))))
+
+    (testing "iterator"
+      (let [acc (atom [])
+            xs  [1 2 3]]
+        (is (= nil
+               (loopr []
+                      [x xs :via :iterator]
+                      (do (swap! acc conj x)
+                          (recur)))))
+        (is (= [1 2 3] @acc))))
+
+    (testing "final"
+      (is (= :finished (loopr [] [x [1 2 3]] (recur) :finished))))
+
+    (testing "early return"
+      (is (= 2
+             (loopr []
+                    [x [1 2 3] :via :reduce]
+                    (if (even? x)
+                      x
+                      (recur))
+                    :not-found)
+             (loopr []
+                    [x [1 2 3] :via :iterator]
+                    (if (even? x)
+                      x
+                      (recur))
+                    :not-found))))
+    ))
 
 (deftest rewrite-tails-test
   (is (= 2 (rewrite-tails inc '1)))

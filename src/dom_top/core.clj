@@ -450,7 +450,8 @@
   "Like loopr, specialized for traversal using a mutable iterator. Builds a
   form which returns a single accumulator, or a vector of accumulators, after
   traversing each x in xs (and more element bindings within)."
-  [accumulator-bindings [{:keys [lhs rhs] :as eb} & more-element-bindings] body]
+  [accumulator-bindings [{:keys [lhs rhs] :as eb} & more-element-bindings]
+   body opts]
   (let [accs (map first (partition 2 accumulator-bindings))
         bname (:name eb)
         iter (gensym (str bname "-iter-"))
@@ -468,8 +469,8 @@
              ~(if more-element-bindings
                 ; More iteration to do within. Descend, come back, recur.
                 `(let [~res ~(loopr-helper accumulator-bindings
-                                             more-element-bindings
-                                             body)]
+                                           more-element-bindings
+                                           body opts)]
                    (if (instance? Return ~res)
                      ; Early return!
                      ~res
@@ -492,19 +493,20 @@
   returns a single accumulator, or a vector of accumulators, after traversing
   each x in xs (and more element bindings within). Reduce is often faster over
   Clojure data structures than a raw iterator."
-  [accumulator-bindings [{:keys [lhs rhs] :as eb} & more-element-bindings] body]
+  [accumulator-bindings [{:keys [lhs rhs] :as eb} & more-element-bindings]
+   body {:keys [acc-count] :as opts}]
   (let [accs (map first (partition 2 accumulator-bindings))
-        single-acc? (< (count accs) 2)
         res  (gensym (str (:name eb) "-res-"))
-        acc  (if single-acc?
-               (first accs)
+        acc  (case acc-count
+               0 '_
+               1 (first accs)
                (vec accs))]
     `(reduce (fn ~(symbol (str "reduce-" (:name eb))) [~acc ~lhs]
                ~(if more-element-bindings
                   ; More iteration!
                   `(let [res# ~(loopr-helper accumulator-bindings
                                              more-element-bindings
-                                             body)]
+                                             body opts)]
                     ; Early return?
                     (if (instance? Return res#)
                       (reduced res#)
@@ -518,21 +520,24 @@
                     (fn rewrite-tail [form]
                       (if (and (seq? form) (= 'recur (first form)))
                         ; Recur
-                        (if single-acc?
-                          (do (assert (= 1 (count (rest form))))
+                        (case acc-count
+                          0 nil
+                          1 (do (assert (= 1 (count (rest form))))
                               (first (rest form)))
                           (vec (rest form)))
                         ; Early return
                         `(reduced (Return. ~form))))
                     body)))
-             ~acc
+             ~(if (zero? acc-count) nil acc)
              ~rhs)))
 
 (defn loopr-helper
   "Helper for building each stage of a nested loopr. Takes an accumulator
-  binding vector, a vector of element bindings maps {:lhs, :rhs, :name}, and
-  body expression."
-  [accumulator-bindings element-bindings body]
+  binding vector, a vector of element bindings maps {:lhs, :rhs, :name}, a
+  body expression, and an option map with
+
+  :acc-count - The number of accumulators"
+  [accumulator-bindings element-bindings body opts]
   (if (empty? element-bindings)
     ; Done!
     body
@@ -547,7 +552,7 @@
                        ; With single accumulators, Clojure's internal reduce is
                        ; usually more efficient
                        loopr-reduce))]
-      (strategy accumulator-bindings element-bindings body))))
+      (strategy accumulator-bindings element-bindings body opts))))
 
 (defmacro loopr
   "Like `loop`, but for reducing over (possibly nested) collections. Compared to
@@ -557,13 +562,23 @@
 
   Takes an initial binding vector for accumulator variables, (like `loop`);
   then a binding vector of loop variables to collections (like `for`); then a
-  body, then an optional final expression. Iterates over each element of the
+  body form, then an optional final form. Iterates over each element of the
   collections, like `for` would, and evaluates body with that combination of
-  elements bound. The body should always contain one or more (recur ...) forms
-  with new values for each accumulator. When the loop completes normally,
-  loopr returns the value of the final expression, or the sole accumulator
-  value if there is only one, or a vector of accumulator values if there were
-  multiple. For example:
+  elements bound.
+
+  Like `loop`, the body should generally contain one or more (recur ...) forms
+  with new values for each accumulator. Any non-recur form in tail position
+  causes loopr to return that value immediately.
+
+  When the loop completes normally, loopr returns:
+
+  - The value of the final expression, which has access to the accumulators, or
+  - If no `final` is given...
+    - With zero accumulators, returns `nil`
+    - With one accumulator, returns that accumulator
+    - With multiple accumulators, returns a vector of each.
+
+  For example,
 
     (loopr [sum 0]
            [x [1 2 3]]
@@ -641,17 +656,30 @@
   iterator.
 
   Like `loop`, `loopr` supports early return. Any non `(recur ...)` form in
-  tail position in the body is returned immediately. To search for the first
-  odd number in collection, returning that number and its index:
+  tail position in the body is returned immediately, without visiting any other
+  elements in the collection(s). To search for the first odd number in
+  collection, returning that number and its index:
 
     (loopr [i 0]
-           [x [0 5 2 3]]
+           [x [0 3 4 5]]
            (if (odd? x)
              {:i i, :x x}
              (recur (inc i))))
-  "
+    ; => {:i 1, :x 5}
+
+  When no accumulators are provided, loopr still iterates, returning any
+  early-returned value, or the final expression when iteration completes, or
+  `nil` otherwise. Here we find an key in a map by value. Note that we can also
+  destructure in iterator bindings.
+
+    (loopr []
+           [[k v] {:x 1, :y 2}]
+           (if (= v 2)
+             k
+             (recur))
+           :not-found)
+    ; => :y"
   [accumulator-bindings element-bindings body & [final]]
-  (assert (<= 2 (count accumulator-bindings))) ; TODO: add support for no accs
   (assert (<= 2 (count element-bindings))) ; TODO: determine semantics for this?
   (assert (even? (count accumulator-bindings)))
   (assert (even? (count element-bindings)))
@@ -681,12 +709,14 @@
                                :rhs  f2}]
                   (recur fs (conj bindings binding)))))))
         acc-names   (map first (partition 2 accumulator-bindings))
-        single-acc? (< (count acc-names) 2)
-        acc         (if single-acc?
-                      (first acc-names)
-                      (vec acc-names))]
+        acc-count   (count acc-names)
+        acc         (case acc-count
+                      0 (gensym 'res-)
+                      1 (first acc-names)
+                      (vec acc-names))
+        opts        {:acc-count acc-count}]
     `(let [~@accumulator-bindings
-           ~acc ~(loopr-helper accumulator-bindings element-bindings body)]
+           ~acc ~(loopr-helper accumulator-bindings element-bindings body opts)]
        (if (instance? Return ~acc)
          (.value ~acc)
          ~(or final acc)))))
