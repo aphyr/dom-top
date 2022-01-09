@@ -451,19 +451,20 @@
   form which returns a single accumulator, or a vector of accumulators, after
   traversing each x in xs (and more element bindings within)."
   [accumulator-bindings [{:keys [lhs rhs] :as eb} & more-element-bindings]
-   body opts]
+   body {:keys [acc-count] :as opts}]
   (let [accs (map first (partition 2 accumulator-bindings))
         bname (:name eb)
         iter (gensym (str bname "-iter-"))
         res  (gensym (str bname "-res-"))
-        single-acc? (< (count accs) 2)
         rhs  (vary-meta rhs assoc :tag `Iterable)]
     `(let [~iter ^Iterator (.iterator ~rhs)]
        ; Bind each accumulator to itself initially
        (loop [~@(mapcat (juxt identity identity) accs)]
          (if-not (.hasNext ~iter)
-           ~(if single-acc?
-              (first accs)
+           ; We're done iterating
+           ~(case acc-count
+              0 nil
+              1 (first accs)
               `[~@accs])
            (let [~lhs (.next ~iter)]
              ~(if more-element-bindings
@@ -474,8 +475,9 @@
                    (if (instance? Return ~res)
                      ; Early return!
                      ~res
-                     (recur ~@(if single-acc?
-                                [res]
+                     (recur ~@(case acc-count
+                                0 []
+                                1 [res]
                                 (map-indexed (fn [i acc] `(nth ~res ~i))
                                              accs)))))
                 ; This is the deepest level; use body directly. It'll contain a

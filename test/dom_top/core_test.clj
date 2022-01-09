@@ -379,6 +379,35 @@
                       x
                       (recur))
                     :not-found))))
+
+    (testing "nested"
+      (let [matrix [[1 2 3] [4 5 6] [7 8 9]]]
+        (is (= [:found 5]
+               (loopr []
+                      [row matrix :via :reduce
+                       x   row    :via :reduce]
+                      (if (= x 5)
+                        [:found 5]
+                        (recur)))
+               (loopr []
+                      [row matrix :via :iterator
+                       x   row    :via :reduce]
+                      (if (= x 5)
+                        [:found 5]
+                        (recur)))
+               (loopr []
+                      [row matrix :via :reduce
+                       x   row    :via :iterator]
+                      (if (= x 5)
+                        [:found 5]
+                        (recur)))
+               (loopr []
+                      [row matrix :via :iterator
+                       x   row    :via :iterator]
+                      (if (= x 5)
+                        [:found 5]
+                        (recur)))))))
+
     ))
 
 (deftest rewrite-tails-test
