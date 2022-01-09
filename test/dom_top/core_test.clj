@@ -260,6 +260,22 @@
                     (recur (inc count) (+ sum x))
                     {:count count, :sum sum, :mean (/ sum count)}))))
 
+    (testing "arrays"
+      (is (= 6 (loopr [sum 0]
+                      [x (int-array [1 2 3]) :via :array]
+                      (recur (+ sum x)))))
+      (let [matrix (to-array-2d [[1 2 3] [4 5 6] [7 8 9]])]
+        (is (= [9 45]
+               (loopr [count 0, sum 0]
+                      [row matrix :via :array, x row :via :array]
+                      (recur (inc count) (+ sum x)))
+               (loopr [count 0, sum 0]
+                      [row matrix :via :array, x row :via :reduce]
+                      (recur (inc count) (+ sum x)))
+               (loopr [count 0, sum 0]
+                      [row matrix :via :reduce, x row :via :array]
+                      (recur (inc count) (+ sum x)))))))
+
     (testing "nestable"
       (is (= [9 45]
              (loopr [count 0, sum 0]
@@ -407,7 +423,6 @@
                       (if (= x 5)
                         [:found 5]
                         (recur)))))))
-
     ))
 
 (deftest rewrite-tails-test
@@ -433,128 +448,154 @@
       (is (= 4 (eval `(let [~'x :default] ~form)))))))
 
 (deftest ^:perf loopr-perf-test
-  (let [bigvec   (->> (range 10000) vec)
-        bigarray (->> (range 10000) long-array)
-        bigseq   (->> (range 10000) (map identity))]
-      (testing "single accumulators"
-        (println "\nSingle-acc loop with seq over vector")
-        (quick-bench
-          (loop [sum 0
-                 xs  bigvec]
-            (if-not (seq xs)
-              sum
-              (let [[x & xs] xs]
-                (recur (+ sum x) xs)))))
+  #_
+  (testing "single accumulators"
+    (let [bigvec   (->> (range 10000) vec)
+          bigarray (->> (range 10000) long-array)
+          bigseq   (->> (range 10000) (map identity))]
+      (println "\nSingle-acc loop with seq over vector")
+      (quick-bench
+        (loop [sum 0
+               xs  bigvec]
+          (if-not (seq xs)
+            sum
+            (let [[x & xs] xs]
+              (recur (+ sum x) xs)))))
 
-        (println "\nSingle-acc reduce over vector")
-        (quick-bench
-          (reduce + bigvec))
+      (println "\nSingle-acc reduce over vector")
+      (quick-bench
+        (reduce + bigvec))
 
-        (println "\nSingle-acc loopr over vector")
-        (quick-bench
-          (loopr [sum 0] [x bigvec] (recur (+ sum x)))))
+      (println "\nSingle-acc loopr over vector")
+      (quick-bench
+        (loopr [sum 0] [x bigvec] (recur (+ sum x)))))
 
-      (testing "multiple accumulators"
-        (println "\nMulti-acc loop with seq over vector")
-        (quick-bench
-          (loop [sum   0
-                 count 0
-                 xs    bigvec]
-            (if-not (seq xs)
-              [sum count]
-              (let [[x & xs] xs]
-                (recur (+ sum x) (inc count) xs)))))
+    (testing "multiple accumulators"
+      (println "\nMulti-acc loop with seq over vector")
+      (quick-bench
+        (loop [sum   0
+               count 0
+               xs    bigvec]
+          (if-not (seq xs)
+            [sum count]
+            (let [[x & xs] xs]
+              (recur (+ sum x) (inc count) xs)))))
 
-        (println "\nMulti-acc reduce over vector")
-        (quick-bench
-          (reduce (fn [[sum count] x]
-                    [(+ sum x) (inc count)])
-                  [0 0]
-                  bigvec))
+      (println "\nMulti-acc reduce over vector")
+      (quick-bench
+        (reduce (fn [[sum count] x]
+                  [(+ sum x) (inc count)])
+                [0 0]
+                bigvec))
 
-        (println "\nMulti-acc loopr over vector")
-        (quick-bench
-          (loopr [sum 0, count 0]
-                 [x bigvec]
-                 (recur (+ sum x) (inc count)))))
+      (println "\nMulti-acc loopr over vector")
+      (quick-bench
+        (loopr [sum 0, count 0]
+               [x bigvec]
+               (recur (+ sum x) (inc count))))))
 
-    (testing "nested structures"
-      (let [people (->> (range 10000)
-                        (map (fn [i]
-                               {:name i
-                                :pets (->> (range (rand-int 10))
-                                           (map (fn [j]
-                                                  {:name j})))}))
-                        doall)]
-          (println "\nSingle-acc loop with seq over nested seq")
-          (quick-bench
-            (loop [pet-count 0
-                   people    people]
-              (if-not (seq people)
-                pet-count
-                (let [[person & people] people]
-                  (recur (loop [pet-count pet-count
-                                pets      (:pets person)]
-                           (if-not (seq pets)
-                             pet-count
-                             (recur (inc pet-count) (next pets))))
-                         people)))))
+  #_
+  (testing "nested structures"
+    (let [people (->> (range 10000)
+                      (map (fn [i]
+                             {:name i
+                              :pets (->> (range (rand-int 10))
+                                         (map (fn [j]
+                                                {:name j})))}))
+                      doall)]
+      (println "\nSingle-acc loop with seq over nested seq")
+      (quick-bench
+        (loop [pet-count 0
+               people    people]
+          (if-not (seq people)
+            pet-count
+            (let [[person & people] people]
+              (recur (loop [pet-count pet-count
+                            pets      (:pets person)]
+                       (if-not (seq pets)
+                         pet-count
+                         (recur (inc pet-count) (next pets))))
+                     people)))))
 
-          (println "\nSingle-acc reduce over nested seq")
-          (quick-bench
-            (reduce (fn [pet-count person]
-                      (reduce (fn [pet-count pet]
-                                (inc pet-count))
-                              pet-count
-                              (:pets person)))
-                    0
-                    people))
+      (println "\nSingle-acc reduce over nested seq")
+      (quick-bench
+        (reduce (fn [pet-count person]
+                  (reduce (fn [pet-count pet]
+                            (inc pet-count))
+                          pet-count
+                          (:pets person)))
+                0
+                people))
 
-          (println "\nSingle-acc loopr over nested seq")
-          (quick-bench
-            (loopr [pet-count 0]
-                   [person people
-                    pet    (:pets person)]
-                   (recur (inc pet-count))))
+      (println "\nSingle-acc loopr over nested seq")
+      (quick-bench
+        (loopr [pet-count 0]
+               [person people
+                pet    (:pets person)]
+               (recur (inc pet-count))))
 
-          (println "\nMulti-acc loop with seq over nested seq")
-          (quick-bench
-            (loop [pet-count    0
-                   pet-names    #{}
-                   people       people]
-              (if-not (seq people)
-                [pet-count pet-names]
-                (let [[person & people] people
+      (println "\nMulti-acc loop with seq over nested seq")
+      (quick-bench
+        (loop [pet-count    0
+               pet-names    #{}
+               people       people]
+          (if-not (seq people)
+            [pet-count pet-names]
+            (let [[person & people] people
+                  [pet-count pet-names]
+                  (loop [pet-count pet-count
+                         pet-names pet-names
+                         pets      (:pets person)]
+                    (if-not (seq pets)
                       [pet-count pet-names]
-                      (loop [pet-count pet-count
-                             pet-names pet-names
-                             pets      (:pets person)]
-                           (if-not (seq pets)
-                             [pet-count pet-names]
-                             (let [pet (first pets)]
-                               (recur (inc pet-count)
-                                      (conj pet-names (:name pet))
-                                      (next pets)))))]
-                  (recur pet-count pet-names
-                         people)))))
+                      (let [pet (first pets)]
+                        (recur (inc pet-count)
+                               (conj pet-names (:name pet))
+                               (next pets)))))]
+              (recur pet-count pet-names
+                     people)))))
 
-          (println "\nMulti-acc reduce over nested seq")
-          (quick-bench
-            (reduce (fn [acc person]
-                      (reduce (fn [[pet-count pet-names] pet]
-                                [(inc pet-count)
-                                 (conj pet-names (:name pet))])
-                              acc
-                              (:pets person)))
-                    [0 #{}]
-                    people))
+      (println "\nMulti-acc reduce over nested seq")
+      (quick-bench
+        (reduce (fn [acc person]
+                  (reduce (fn [[pet-count pet-names] pet]
+                            [(inc pet-count)
+                             (conj pet-names (:name pet))])
+                          acc
+                          (:pets person)))
+                [0 #{}]
+                people))
 
-        (println "\nMulti-acc loopr over nested seq")
-        (quick-bench
-          (loopr [pet-count 0
-                  pet-names #{}]
-                 [person people
-                  pet    (:pets person)]
-                 (recur (inc pet-count)
-                        (conj pet-names (:name pet)))))
-        ))))
+      (println "\nMulti-acc loopr over nested seq")
+      (quick-bench
+        (loopr [pet-count 0
+                pet-names #{}]
+               [person people
+                pet    (:pets person)]
+               (recur (inc pet-count)
+                      (conj pet-names (:name pet)))))))
+
+  (testing "arrays"
+    (let [ary (long-array (range 10000))]
+      (println "\nSingle-acc reduce over array")
+      (quick-bench
+        (reduce + ary))
+
+      (println "\nSingle-acc loopr over array")
+      (quick-bench
+        (loopr [sum 0]
+               [x ary :via :array]
+               (recur (+ sum x)))))
+
+    (let [matrix (to-array-2d (repeat 1000 (range 1000)))]
+      (println "\nSingle-acc reduce over 2d array")
+      (quick-bench
+        (reduce (partial reduce +) 0 matrix))
+
+      (println "\nSingle-acc loopr over 2d array")
+      (quick-bench
+        (loopr [sum 0]
+               [row                     matrix :via :array
+                x   ^"[Ljava.lang.Long;" row    :via :array]
+               (recur (+ sum x)))))
+    ))

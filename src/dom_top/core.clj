@@ -447,9 +447,10 @@
 (declare loopr-helper)
 
 (defn loopr-iterator
-  "Like loopr, specialized for traversal using a mutable iterator. Builds a
-  form which returns a single accumulator, or a vector of accumulators, after
-  traversing each x in xs (and more element bindings within)."
+  "A single loopr layer specialized for traversal using a mutable iterator.
+  Builds a form which returns a single accumulator, or a vector of
+  accumulators, or a Return, after traversing each x in xs (and more element
+  bindings within)."
   [accumulator-bindings [{:keys [lhs rhs] :as eb} & more-element-bindings]
    body {:keys [acc-count] :as opts}]
   (let [accs (map first (partition 2 accumulator-bindings))
@@ -462,7 +463,7 @@
        (loop [~@(mapcat (juxt identity identity) accs)]
          (if-not (.hasNext ~iter)
            ; We're done iterating
-           ~(case acc-count
+           ~(case (int acc-count)
               0 nil
               1 (first accs)
               `[~@accs])
@@ -475,7 +476,7 @@
                    (if (instance? Return ~res)
                      ; Early return!
                      ~res
-                     (recur ~@(case acc-count
+                     (recur ~@(case (int acc-count)
                                 0 []
                                 1 [res]
                                 (map-indexed (fn [i acc] `(nth ~res ~i))
@@ -491,15 +492,15 @@
                                  body))))))))
 
 (defn loopr-reduce
-  "Like loopr, specialized for traversal using `reduce`. Builds a form which
-  returns a single accumulator, or a vector of accumulators, after traversing
-  each x in xs (and more element bindings within). Reduce is often faster over
-  Clojure data structures than a raw iterator."
+  "A single loopr layer specialized for traversal using `reduce`. Builds a form
+  which returns a single accumulator, or a vector of accumulators, or a Return,
+  after traversing each x in xs (and more element bindings within). Reduce is
+  often faster over Clojure data structures than a raw iterator."
   [accumulator-bindings [{:keys [lhs rhs] :as eb} & more-element-bindings]
    body {:keys [acc-count] :as opts}]
   (let [accs (map first (partition 2 accumulator-bindings))
         res  (gensym (str (:name eb) "-res-"))
-        acc  (case acc-count
+        acc  (case (int acc-count)
                0 '_
                1 (first accs)
                (vec accs))]
@@ -522,7 +523,7 @@
                     (fn rewrite-tail [form]
                       (if (and (seq? form) (= 'recur (first form)))
                         ; Recur
-                        (case acc-count
+                        (case (int acc-count)
                           0 nil
                           1 (do (assert (= 1 (count (rest form))))
                               (first (rest form)))
@@ -532,6 +533,52 @@
                     body)))
              ~(if (zero? acc-count) nil acc)
              ~rhs)))
+
+(defn loopr-array
+  "A single loopr layer specialized for traversal over arrays. Builds a form
+  which returns a single accumulator, or a vector of accumulators, or a Return,
+  after traversing each x in xs using `aget`."
+  [accumulator-bindings [{:keys [lhs rhs] :as eb} & more-element-bindings]
+   body {:keys [acc-count] :as opts}]
+  (let [accs (map first (partition 2 accumulator-bindings))
+        bname (:name eb)
+        i     (gensym (str bname "-i-"))
+        i-max (gensym (str bname "-i-max-"))
+        res   (gensym (str bname "-res-"))]
+    `(let [~i-max (alength ~rhs)]
+       (loop [; Our index into the array
+              ~i (int 0)
+              ; Initialize each accumulator to itself.
+              ~@(mapcat (juxt identity identity) accs)]
+         (if (= ~i ~i-max)
+           ; Done
+           ~(case (int acc-count)
+              0 nil
+              1 (first accs)
+              `[~@accs])
+           ; Get an x
+           (let [~lhs (aget ~rhs ~i)]
+             ~(if more-element-bindings
+                ; Descend into inner loop
+                `(let [~res ~(loopr-helper accumulator-bindings
+                                           more-element-bindings
+                                           body opts)]
+                   (if (instance? Return ~res)
+                     ~res
+                     (recur (unchecked-inc-int ~i)
+                            ~@(case (int acc-count)
+                                0 []
+                                1 [res]
+                                (map-indexed (fn [i acc] `(nth ~res ~i))
+                                             accs)))))
+                ; This is the deepest level. Evaluate body, but with early
+                ; return for non-recur tails.
+                (rewrite-tails (fn rewrite-tail [form]
+                                 (if (and (seq? form) (= 'recur (first form)))
+                                   `(recur (unchecked-inc-int ~i)
+                                           ~@(rest form))
+                                   `(Return. ~form)))
+                               body))))))))
 
 (defn loopr-helper
   "Helper for building each stage of a nested loopr. Takes an accumulator
@@ -545,15 +592,16 @@
     body
     ; Generate an iterator loop around the top-level element bindings.
     (let [strategy (case (:via (first element-bindings))
+                     :array    loopr-array
                      :iterator loopr-iterator
                      :reduce   loopr-reduce
                      ; With multiple accumulators, vector destructuring can
                      ; make reduce more expensive.
-                     (if (< 2 (count accumulator-bindings))
-                       loopr-iterator
-                       ; With single accumulators, Clojure's internal reduce is
-                       ; usually more efficient
-                       loopr-reduce))]
+                     nil (if (< 2 (count accumulator-bindings))
+                           loopr-iterator
+                           ; With single accumulators, Clojure's internal
+                           ; reduce is usually more efficient
+                           loopr-reduce))]
       (strategy accumulator-bindings element-bindings body opts))))
 
 (defmacro loopr
@@ -641,11 +689,11 @@
   over their internal structure.
 
   Depending on how many accumulators are at play, and which data structures are
-  being traversed, it may be faster to use `loop` with an iterator or `reduce`
-  with a function. loopr compiles to (possibly nested) `reduce` when given a
-  single accumulator, and to (possibly nested) `loop` with mutable iterators
-  when given multiple accumulators. You can also control the iteration tactic
-  for each collection explicitly:
+  being traversed, it may be faster to use `loop` with an iterator, `loop` with
+  `aget`, or `reduce` with a function. loopr compiles to (possibly nested)
+  `reduce` when given a single accumulator, and to (possibly nested) `loop`
+  with mutable iterators when given multiple accumulators. You can also control
+  the iteration tactic for each collection explicitly:
 
     (loopr [count 0
             sum   0]
@@ -655,7 +703,23 @@
       (/ sum count))
 
   This compiles into a `reduce` over rows, and a `loop` over each row using an
-  iterator.
+  iterators. For array iteration, use `:via :array`:
+
+    (loopr [sum 0]
+           [x (long-array (range 10000)) :via :array]
+           (recur (+ sum x)))
+    ; => 49995000
+
+  Note that alength/aget are *very* sensitive to type hints; use `lein check`
+  to ensure that you're not using reflection, and add type hints as necessary.
+  On my older xeon, this is roughly an order of magnitude faster than (reduce +
+  longs). For nested array reduction, make sure to hint inner collections, like
+  so:
+
+    (loopr [sum 0]
+           [row                        matrix :via :array
+            x   ^\"[Ljava.lang.Long;\" row    :via :array]
+           (recur (+ sum x)))))
 
   Like `loop`, `loopr` supports early return. Any non `(recur ...)` form in
   tail position in the body is returned immediately, without visiting any other
@@ -720,5 +784,5 @@
     `(let [~@accumulator-bindings
            ~acc ~(loopr-helper accumulator-bindings element-bindings body opts)]
        (if (instance? Return ~acc)
-         (.value ~acc)
+         (.value ~(vary-meta acc assoc :tag `Return))
          ~(or final acc)))))
