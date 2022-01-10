@@ -448,7 +448,6 @@
       (is (= 4 (eval `(let [~'x :default] ~form)))))))
 
 (deftest ^:perf loopr-perf-test
-  #_
   (testing "single accumulators"
     (let [bigvec   (->> (range 10000) vec)
           bigarray (->> (range 10000) long-array)
@@ -494,7 +493,6 @@
                [x bigvec]
                (recur (+ sum x) (inc count))))))
 
-  #_
   (testing "nested structures"
     (let [people (->> (range 10000)
                       (map (fn [i]

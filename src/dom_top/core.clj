@@ -731,7 +731,7 @@
            (if (odd? x)
              {:i i, :x x}
              (recur (inc i))))
-    ; => {:i 1, :x 5}
+    ; => {:i 1, :x 3}
 
   When no accumulators are provided, loopr still iterates, returning any
   early-returned value, or the final expression when iteration completes, or
