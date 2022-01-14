@@ -422,8 +422,16 @@
                        x   row    :via :iterator]
                       (if (= x 5)
                         [:found 5]
-                        (recur)))))))
-    ))
+                        (recur))))))))
+
+  (testing "reduce with multiple destructuring accs and destructuring"
+    (is (= {:count 4, :sum 10, :min 1, :max 4}
+           (loopr [[count sum] [0 0]
+                   [min- max-]   [##Inf ##-Inf]]
+                  [x [1 2 3 4]]
+                  (recur [(inc count) (+ sum x)]
+                         [(min min- x) (max max- x)])
+                  {:sum sum :count count :min min- :max max-})))))
 
 (deftest rewrite-tails-test
   (is (= 2 (rewrite-tails inc '1)))
@@ -448,10 +456,10 @@
       (is (= 4 (eval `(let [~'x :default] ~form)))))))
 
 (deftest ^:perf loopr-perf-test
-  (testing "single accumulators"
-    (let [bigvec   (->> (range 10000) vec)
-          bigarray (->> (range 10000) long-array)
-          bigseq   (->> (range 10000) (map identity))]
+  (let [bigvec   (->> (range 10000) vec)
+        bigarray (->> (range 10000) long-array)
+        bigseq   (->> (range 10000) (map identity))]
+    (testing "single accumulators"
       (println "\nSingle-acc loop with seq over vector")
       (quick-bench
         (loop [sum 0
@@ -487,10 +495,16 @@
                 [0 0]
                 bigvec))
 
-      (println "\nMulti-acc loopr over vector")
+      (println "\nMulti-acc loopr (reduce) over vector")
       (quick-bench
         (loopr [sum 0, count 0]
-               [x bigvec]
+               [x bigvec :via :reduce]
+               (recur (+ sum x) (inc count))))
+
+      (println "\nMulti-acc loopr (iterator) over vector")
+      (quick-bench
+        (loopr [sum 0, count 0]
+               [x bigvec :via :iterator]
                (recur (+ sum x) (inc count))))))
 
   (testing "nested structures"

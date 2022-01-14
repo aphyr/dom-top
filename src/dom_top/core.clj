@@ -495,7 +495,7 @@
   "A single loopr layer specialized for traversal using `reduce`. Builds a form
   which returns a single accumulator, or a vector of accumulators, or a Return,
   after traversing each x in xs (and more element bindings within). Reduce is
-  often faster over Clojure data structures than a raw iterator."
+  often faster over Clojure data structures than an iterator."
   [accumulator-bindings [{:keys [lhs rhs] :as eb} & more-element-bindings]
    body {:keys [acc-count] :as opts}]
   (let [accs (map first (partition 2 accumulator-bindings))
@@ -503,36 +503,94 @@
         acc  (case (int acc-count)
                0 '_
                1 (first accs)
-               (vec accs))]
-    `(reduce (fn ~(symbol (str "reduce-" (:name eb))) [~acc ~lhs]
-               ~(if more-element-bindings
-                  ; More iteration!
-                  `(let [res# ~(loopr-helper accumulator-bindings
-                                             more-element-bindings
-                                             body opts)]
-                    ; Early return?
-                    (if (instance? Return res#)
-                      (reduced res#)
-                      res#))
-                  ; This is the deepest level. Rewrite body to replace terminal
-                  ; expressions:
-                  ; (recur x)   -> x
-                  ; (recur x y) -> [x y]
-                  ; x           -> (reduced (Return. x))
-                  (rewrite-tails
-                    (fn rewrite-tail [form]
-                      (if (and (seq? form) (= 'recur (first form)))
-                        ; Recur
-                        (case (int acc-count)
-                          0 nil
-                          1 (do (assert (= 1 (count (rest form))))
-                              (first (rest form)))
-                          (vec (rest form)))
-                        ; Early return
-                        `(reduced (Return. ~form))))
-                    body)))
-             ~(if (zero? acc-count) nil acc)
-             ~rhs)))
+               (vec accs))
+        ; The first accumulator we encode in the function arg
+        first-acc (case (int acc-count)
+                   0 '_
+                   (first accs))
+        ; Remaining accumulators are stored in volatiles, which we bind to
+        ; these expressions each round
+        rest-accs (next accs)
+        ; The names of each volatile
+        rest-acc-volatiles (map-indexed (fn [i acc]
+                                          (gensym
+                                            (if (symbol? acc)
+                                              (str acc "-vol-")
+                                              (str i "-vol-"))))
+                                        (next accs))
+        ; A let binding vector for the initial values of our volatiles
+        rest-acc-init-binding (when rest-accs
+                                (mapcat (fn [volatile acc]
+                                          [volatile `(volatile! ~acc)])
+                                        rest-acc-volatiles
+                                        rest-accs))
+        ; Stores the result of the inner loop
+        inner-res  (gensym 'inner-res-)
+        ; Stores the result of our reduce
+        reduce-res (gensym 'res-)]
+    `(let [~@rest-acc-init-binding
+           ~reduce-res
+       (reduce (fn ~(symbol (str "reduce-" (:name eb))) [~first-acc ~lhs]
+                 ; Fetch our current volatiles
+                 (let [~@(->> rest-acc-volatiles
+                              (map (partial list `deref))
+                              (mapcat vector rest-accs))]
+                   ~(if more-element-bindings
+                      ; More iteration!
+                      `(let [~inner-res ~(loopr-helper accumulator-bindings
+                                                       more-element-bindings
+                                                       body opts)]
+                         ; Early return?
+                         (if (instance? Return ~inner-res)
+                           (reduced ~inner-res)
+                           ~(if (< acc-count 2)
+                              inner-res
+                              ; Update our volatiles and pull out the first acc
+                              `(do ~@(map-indexed
+                                       (fn [i volatile]
+                                         `(vreset! ~volatile
+                                                   (nth ~inner-res ~(inc i))))
+                                       rest-acc-volatiles)
+                                   (first ~inner-res)))))
+                      ; This is the deepest level. Rewrite body to replace
+                      ; terminal expressions:
+                      ; (recur x)   -> x
+                      ; (recur x y) -> [x y]
+                      ; x           -> (reduced (Return. x))
+                      (rewrite-tails
+                        (fn rewrite-tail [form]
+                          (if (and (seq? form) (= 'recur (first form)))
+                            ; Recur
+                            (case (int acc-count)
+                              0 nil
+                              1 (do (assert (= 1 (count (rest form))))
+                                    (first (rest form)))
+                              ; For multiple accumulators, we want to set the
+                              ; rest accs as a side effect, and return the
+                              ; first acc.
+                              (let [[recur_ first-acc-value & rest-acc-values]
+                                    form]
+                                `(do ~@(map (fn [volatile value]
+                                              `(vreset! ~volatile ~value))
+                                            rest-acc-volatiles
+                                            rest-acc-values)
+                                     ~first-acc-value)))
+                            ; Early return
+                            `(reduced (Return. ~form))))
+                        body))))
+               ~(if (zero? acc-count) nil first-acc)
+               ~rhs)]
+       ~(case (int acc-count)
+          ; For 0 or single accs, return the reduce value itself
+          (0, 1) reduce-res
+          ; With multiple accs, return a vector of their values.
+          `(if (instance? Return ~reduce-res)
+             ; Early return
+             ~reduce-res
+             ; Multiple return
+             [~reduce-res
+              ~@(map (partial list `deref) rest-acc-volatiles)])))))
+
 
 (defn loopr-array
   "A single loopr layer specialized for traversal over arrays. Builds a form
@@ -780,9 +838,12 @@
                       0 (gensym 'res-)
                       1 (first acc-names)
                       (vec acc-names))
-        opts        {:acc-count acc-count}]
+        opts        {:acc-count acc-count}
+        res         (gensym 'res-)]
     `(let [~@accumulator-bindings
-           ~acc ~(loopr-helper accumulator-bindings element-bindings body opts)]
-       (if (instance? Return ~acc)
-         (.value ~(vary-meta acc assoc :tag `Return))
-         ~(or final acc)))))
+           ~res ~(loopr-helper accumulator-bindings element-bindings body opts)]
+       (if (instance? Return ~res)
+         (.value ~(vary-meta res assoc :tag `Return))
+         ~(if final
+            `(let [~acc ~res] ~final)
+            res)))))
