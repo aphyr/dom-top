@@ -1,4 +1,4 @@
-(ns ^:focus dom-top.core-test
+(ns dom-top.core-test
   (:require #?(:clj [clojure.pprint :refer [pprint]])
             #?(:clj [clojure.test :refer :all]
                :cljs [cljs.test :refer [deftest is testing]])
