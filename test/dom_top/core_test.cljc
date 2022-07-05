@@ -1,31 +1,49 @@
-(ns dom-top.core-test
-  (:require [clojure [pprint :refer [pprint]]
-                     [test :refer :all]]
-            [criterium.core :refer [bench quick-bench]]
-            [dom-top.core :refer :all])
-  (:import (java.util.concurrent BrokenBarrierException
-                                 CyclicBarrier)))
+(ns ^:focus dom-top.core-test
+  (:require #?(:clj [clojure.pprint :refer [pprint]])
+            #?(:clj [clojure.test :refer :all]
+               :cljs [cljs.test :refer [deftest is testing]])
+            #?(:clj [criterium.core :refer [bench quick-bench]])
+            #?(:cljs [shadow.cljs.modern :refer [defclass]])
+            #?(:cljs [dom-top.core :refer [assert+ disorderly fcatch with-retry letr loopr]]
+               :clj [dom-top.core :refer :all]))
+  #?(:clj (:import (java.util.concurrent BrokenBarrierException
+                                         CyclicBarrier))))
+
+#_:clj-kondo/ignore
+#?(:cljs
+   (defclass CustomJSError
+     (extends js/Error)
+
+     (constructor [this x]
+                  (super x))))
 
 (deftest assert+-test
   (testing "passthrough"
     (is (= :foo (assert+ :foo)))
     (is (= :foo (assert+ :foo "failed")))
-    (is (= :foo (assert+ :foo IllegalStateException "failed"))))
+    (is (= :foo (assert+ :foo #?(:clj IllegalStateException
+                                 :cljs js/Error) "failed"))))
 
   (testing "Default error"
-    (is (thrown-with-msg? IllegalArgumentException #"\AAssert failed\z"
+    (is (thrown-with-msg? #?(:clj IllegalArgumentException
+                             :cljs js/Error)
+                          #"^Assert failed$"
                           (assert+ false))))
 
   (testing "Custom message"
-    (is (thrown-with-msg? IllegalArgumentException #"\Ahi\z"
+    (is (thrown-with-msg? #?(:clj IllegalArgumentException
+                             :cljs js/Error) #"^hi$"
                           (assert+ false "hi"))))
 
   (testing "Custom class"
-    (is (thrown-with-msg? RuntimeException #"\AYOU!\?\z"
-                          (assert+ nil RuntimeException "YOU!?"))))
+    (is (thrown-with-msg? #?(:clj RuntimeException
+                             :cljs CustomJSError) #"^YOU!\?$"
+                             (assert+ nil #?(:clj RuntimeException
+                                             :cljs CustomJSError) "YOU!?"))))
 
   (testing "Ex-info"
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"\AAssert failed:\n\{:type :frog-blast\}"
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo
+                             :cljs ExceptionInfo) #"^Assert failed:\n\{:type :frog-blast\}"
                           (assert+ false {:type :frog-blast})))))
 
 (deftest disorderly-test
@@ -49,7 +67,7 @@
         (is (= #{[0 1] [1 0]}
                (set (keys effects)))))
 
-      (testing "roughly as often"
+      #_(testing "roughly as often"
         (->> (vals effects)
              (every? (fn [freq] (<= (Math/abs (double (- freq (/ n 2))))
                                     (Math/sqrt n))))
@@ -76,7 +94,7 @@
         (is (= #{[0 1 2] [0 2 1] [1 0 2] [1 2 0] [2 0 1] [2 1 0]}
                (set (keys effects)))))
 
-      (testing "roughly as often"
+      #_(testing "roughly as often"
         (->> (vals effects)
              (every? (fn [freq]
                        (<= (Math/abs (double (- freq (/ n 6))))
@@ -85,87 +103,107 @@
 
 
 (deftest fcatch-test
-  (let [ex (RuntimeException. "foo")]
+  (let [ex (#?(:clj RuntimeException.
+               :cljs js/Error) "foo")]
     (is (identical? ex ((fcatch #(throw ex)))))))
 
-(deftest real-pmap-helper-test
-  (testing "catches exceptions"
-    (let [res (real-pmap-helper (fn [x]
-                              (when (= x 0)
-                                (Thread/sleep 5)
-                                (throw (RuntimeException. "hi")))
+#?(:clj
+   (deftest real-pmap-helper-test
+     (testing "catches exceptions"
+       (let [res (real-pmap-helper (fn [x]
+                                     (when (= x 0)
+                                       (Thread/sleep 5)
+                                       (throw (RuntimeException. "hi")))
 
-                              (throw (BrokenBarrierException. "augh")))
-                            (range 5))]
-      (is (= (repeat 5 :dom-top.core/crashed) (first res)))
-      (is (= {BrokenBarrierException 4
-              InterruptedException 1}
-             (frequencies (map class (second res))))))))
+                                     (throw (BrokenBarrierException. "augh")))
+                                   (range 5))]
+         (is (= (repeat 5 :dom-top.core/crashed) (first res)))
+         (is (= {BrokenBarrierException 4
+                 InterruptedException 1}
+                (frequencies (map class (second res)))))))))
 
-(deftest real-pmap-test
-  (let [n 1000
-        b (CyclicBarrier. n)
-        results (real-pmap (fn [i] [i (.await b)]) (range n))]
-    (testing "preserves input order"
-      (is (= (range n) (map first results))))
+#?(:clj
+   (deftest real-pmap-test
+     (let [n 1000
+           b (CyclicBarrier. n)
+           results (real-pmap (fn [i] [i (.await b)]) (range n))]
+       (testing "preserves input order"
+         (is (= (range n) (map first results))))
 
-    (testing "counts down correctly"
-      (is (= (range n) (sort (map second results))))))
+       (testing "counts down correctly"
+         (is (= (range n) (sort (map second results))))))
 
-  (testing "enforces termination before return"
-    (let [completed (atom [])]
-      (try (real-pmap (fn [dt]
-                        (Thread/sleep dt)
-                        (swap! completed conj dt)
-                        (throw (IllegalStateException. "whoops")))
-                      [50 0])
-           (catch IllegalStateException e
-             (assert (= "whoops") (.getMessage (.getCause e)))))
-      (is (= [0] @completed))
-      ; Other thread should have died.
-      (Thread/sleep 100)
-      (is (= [0] @completed))))
+     (testing "enforces termination before return"
+       (let [completed (atom [])]
+         (try (real-pmap (fn [dt]
+                           (Thread/sleep dt)
+                           (swap! completed conj dt)
+                           (throw (IllegalStateException. "whoops")))
+                         [50 0])
+              (catch IllegalStateException e
+                (assert (= "whoops") (.getMessage (.getCause e)))))
+         (is (= [0] @completed))
+                                        ; Other thread should have died.
+         (Thread/sleep 100)
+         (is (= [0] @completed))))
 
-  (testing "doesn't deadlock"
-    (let [n 6
-          b (CyclicBarrier. n)]
-      (is (thrown-with-msg? RuntimeException #"Agh!"
-                            (real-pmap (fn [i]
-                                         (when (= i (dec n))
-                                           (throw (RuntimeException. "Agh!")))
-                                         (.await b))
-                                       (range n)))))))
+     (testing "doesn't deadlock"
+       (let [n 6
+             b (CyclicBarrier. n)]
+         (is (thrown-with-msg? RuntimeException #"Agh!"
+                               (real-pmap (fn [i]
+                                            (when (= i (dec n))
+                                              (throw (RuntimeException. "Agh!")))
+                                            (.await b))
+                                          (range n))))))))
 
-(deftest bounded-pmap-test
-  (let [n       1000
-        threads (atom #{})
-        results (bounded-pmap (fn [i]
-                                (swap! threads conj (Thread/currentThread))
-                                (- i))
-                              (range n))]
-    (testing "Performs transformation preserving order"
-      (is (= results (map - (range n)))))
+#?(:clj
+   (deftest bounded-pmap-test
+     (let [n       1000
+           threads (atom #{})
+           results (bounded-pmap (fn [i]
+                                   (swap! threads conj (Thread/currentThread))
+                                   (- i))
+                                 (range n))]
+       (testing "Performs transformation preserving order"
+         (is (= results (map - (range n)))))
 
-    (testing "Bounded concurrency"
-      (is (<= (count @threads)
-              (+ 2 (.. Runtime getRuntime availableProcessors)))))))
+       (testing "Bounded concurrency"
+         (is (<= (count @threads)
+                 (+ 2 (.. Runtime getRuntime availableProcessors))))))))
 
 (deftest with-retry-test
   (testing "no bindings"
-    (is (= 1 (with-retry []
-               (/ 1 (rand-int 2))
-               (catch ArithmeticException e
-                 (retry))))))
+    #?(:clj (is (= 1 (with-retry []
+                (/ 1 (rand-int 2))
+                (catch ArithmeticException e
+                  (retry)))))
+       :cljs (is (= 1 (with-retry []
+                        (let [i (rand-int 2)]
+                          (when (zero? i)
+                            (throw (js/Error "bang!")))
+                          i)
+                        (catch js/Error e
+                          (retry)))))))
 
   (testing "countdown"
     (let [tries (atom [])]
-      (is (= :exhausted (with-retry [attempts 5]
-                          (swap! tries conj attempts)
-                          (/ 1 0)
-                          (catch ArithmeticException e
-                            (if (< 1 attempts)
-                              (retry (dec attempts))
-                              :exhausted)))))
+      (is (= :exhausted #?(:clj
+                           (with-retry [attempts 5]
+                             (swap! tries conj attempts)
+                             (/ 1 0)
+                             (catch ArithmeticException e
+                               (if (< 1 attempts)
+                                 (retry (dec attempts))
+                                 :exhausted)))
+                           :cljs
+                           (with-retry [attempts 5]
+                             (swap! tries conj attempts)
+                             (.. js/window -a -b)
+                             (catch js/TypeError e
+                               (if (< 1 attempts)
+                                 (retry (dec attempts))
+                                 :exhausted))))))
       (is (= [5 4 3 2 1] @tries)))))
 
 (deftest letr-test
@@ -433,181 +471,183 @@
                          [(min min- x) (max max- x)])
                   {:sum sum :count count :min min- :max max-})))))
 
-(deftest rewrite-tails-test
-  (is (= 2 (rewrite-tails inc '1)))
-  (is (= '(do 1 2)
-         (rewrite-tails inc '(do 1 1))))
-  (is (= '(do (do 1 2))
-         (rewrite-tails inc '(do (do 1 1)))))
+#?(:clj
+   (deftest rewrite-tails-test
+     (is (= 2 (rewrite-tails inc '1)))
+     (is (= '(do 1 2)
+            (rewrite-tails inc '(do 1 1))))
+     (is (= '(do (do 1 2))
+            (rewrite-tails inc '(do (do 1 1)))))
 
-  (let [inc* #(if (number? %) (inc %) %)]
-    (is (= '(loop* [x 0] (recur 1))
-           (rewrite-tails inc* '(loop [x 0] (recur 1)))))
-    (is (= '(if 3 2 nil)
-           (rewrite-tails inc* '(if 3 1))))
-    (is (= '(if 3 (do 1 1 2) nil)
-           (rewrite-tails inc* '(when 3 1 1 1))))
-    (is (= '(if (even? x) (do 1 2) (do 1 3))
-           (rewrite-tails inc* '(if (even? x) (do 1 1) (do 1 2)))))
-    ; Hard to check this because the case* expands into a weird gensym thing.
-    (let [form (rewrite-tails inc* '(case x :one 1, :two 2, 3))]
-      (is (= 2 (eval `(let [~'x :one] ~form))))
-      (is (= 3 (eval `(let [~'x :two] ~form))))
-      (is (= 4 (eval `(let [~'x :default] ~form)))))))
+     (let [inc* #(if (number? %) (inc %) %)]
+       (is (= '(loop* [x 0] (recur 1))
+              (rewrite-tails inc* '(loop [x 0] (recur 1)))))
+       (is (= '(if 3 2 nil)
+              (rewrite-tails inc* '(if 3 1))))
+       (is (= '(if 3 (do 1 1 2) nil)
+              (rewrite-tails inc* '(when 3 1 1 1))))
+       (is (= '(if (even? x) (do 1 2) (do 1 3))
+              (rewrite-tails inc* '(if (even? x) (do 1 1) (do 1 2)))))
+                                        ; Hard to check this because the case* expands into a weird gensym thing.
+       (let [form (rewrite-tails inc* '(case x :one 1, :two 2, 3))]
+         (is (= 2 (eval `(let [~'x :one] ~form))))
+         (is (= 3 (eval `(let [~'x :two] ~form))))
+         (is (= 4 (eval `(let [~'x :default] ~form))))))))
 
-(deftest ^:perf loopr-perf-test
-  (let [bigvec   (->> (range 10000) vec)
-        bigarray (->> (range 10000) long-array)
-        bigseq   (->> (range 10000) (map identity))]
-    (testing "single accumulators"
-      (println "\nSingle-acc loop with seq over vector")
-      (quick-bench
-        (loop [sum 0
-               xs  bigvec]
-          (if-not (seq xs)
-            sum
-            (let [[x & xs] xs]
-              (recur (+ sum x) xs)))))
+#?(:clj
+   (deftest ^:perf loopr-perf-test
+     (let [bigvec   (->> (range 10000) vec)
+           bigarray (->> (range 10000) long-array)
+           bigseq   (->> (range 10000) (map identity))]
+       (testing "single accumulators"
+         (println "\nSingle-acc loop with seq over vector")
+         (quick-bench
+           (loop [sum 0
+                  xs  bigvec]
+             (if-not (seq xs)
+               sum
+               (let [[x & xs] xs]
+                 (recur (+ sum x) xs)))))
 
-      (println "\nSingle-acc reduce over vector")
-      (quick-bench
-        (reduce + bigvec))
+         (println "\nSingle-acc reduce over vector")
+         (quick-bench
+           (reduce + bigvec))
 
-      (println "\nSingle-acc loopr over vector")
-      (quick-bench
-        (loopr [sum 0] [x bigvec] (recur (+ sum x)))))
+         (println "\nSingle-acc loopr over vector")
+         (quick-bench
+           (loopr [sum 0] [x bigvec] (recur (+ sum x)))))
 
-    (testing "multiple accumulators"
-      (println "\nMulti-acc loop with seq over vector")
-      (quick-bench
-        (loop [sum   0
-               count 0
-               xs    bigvec]
-          (if-not (seq xs)
-            [sum count]
-            (let [[x & xs] xs]
-              (recur (+ sum x) (inc count) xs)))))
+       (testing "multiple accumulators"
+         (println "\nMulti-acc loop with seq over vector")
+         (quick-bench
+           (loop [sum   0
+                  count 0
+                  xs    bigvec]
+             (if-not (seq xs)
+               [sum count]
+               (let [[x & xs] xs]
+                 (recur (+ sum x) (inc count) xs)))))
 
-      (println "\nMulti-acc reduce over vector")
-      (quick-bench
-        (reduce (fn [[sum count] x]
-                  [(+ sum x) (inc count)])
-                [0 0]
-                bigvec))
+         (println "\nMulti-acc reduce over vector")
+         (quick-bench
+           (reduce (fn [[sum count] x]
+                     [(+ sum x) (inc count)])
+                   [0 0]
+                   bigvec))
 
-      (println "\nMulti-acc loopr (reduce) over vector")
-      (quick-bench
-        (loopr [sum 0, count 0]
-               [x bigvec :via :reduce]
-               (recur (+ sum x) (inc count))))
+         (println "\nMulti-acc loopr (reduce) over vector")
+         (quick-bench
+           (loopr [sum 0, count 0]
+                  [x bigvec :via :reduce]
+                  (recur (+ sum x) (inc count))))
 
-      (println "\nMulti-acc loopr (iterator) over vector")
-      (quick-bench
-        (loopr [sum 0, count 0]
-               [x bigvec :via :iterator]
-               (recur (+ sum x) (inc count))))))
+         (println "\nMulti-acc loopr (iterator) over vector")
+         (quick-bench
+           (loopr [sum 0, count 0]
+                  [x bigvec :via :iterator]
+                  (recur (+ sum x) (inc count))))))
 
-  (testing "nested structures"
-    (let [people (->> (range 10000)
-                      (map (fn [i]
-                             {:name i
-                              :pets (->> (range (rand-int 10))
-                                         (map (fn [j]
-                                                {:name j})))}))
-                      doall)]
-      (println "\nSingle-acc loop with seq over nested seq")
-      (quick-bench
-        (loop [pet-count 0
-               people    people]
-          (if-not (seq people)
-            pet-count
-            (let [[person & people] people]
-              (recur (loop [pet-count pet-count
+     (testing "nested structures"
+       (let [people (->> (range 10000)
+                         (map (fn [i]
+                                {:name i
+                                 :pets (->> (range (rand-int 10))
+                                            (map (fn [j]
+                                                   {:name j})))}))
+                         doall)]
+         (println "\nSingle-acc loop with seq over nested seq")
+         (quick-bench
+           (loop [pet-count 0
+                  people    people]
+             (if-not (seq people)
+               pet-count
+               (let [[person & people] people]
+                 (recur (loop [pet-count pet-count
+                               pets      (:pets person)]
+                          (if-not (seq pets)
+                            pet-count
+                            (recur (inc pet-count) (next pets))))
+                        people)))))
+
+         (println "\nSingle-acc reduce over nested seq")
+         (quick-bench
+           (reduce (fn [pet-count person]
+                     (reduce (fn [pet-count pet]
+                               (inc pet-count))
+                             pet-count
+                             (:pets person)))
+                   0
+                   people))
+
+         (println "\nSingle-acc loopr over nested seq")
+         (quick-bench
+           (loopr [pet-count 0]
+                  [person people
+                   pet    (:pets person)]
+                  (recur (inc pet-count))))
+
+         (println "\nMulti-acc loop with seq over nested seq")
+         (quick-bench
+           (loop [pet-count    0
+                  pet-names    #{}
+                  people       people]
+             (if-not (seq people)
+               [pet-count pet-names]
+               (let [[person & people] people
+                     [pet-count pet-names]
+                     (loop [pet-count pet-count
+                            pet-names pet-names
                             pets      (:pets person)]
                        (if-not (seq pets)
-                         pet-count
-                         (recur (inc pet-count) (next pets))))
-                     people)))))
+                         [pet-count pet-names]
+                         (let [pet (first pets)]
+                           (recur (inc pet-count)
+                                  (conj pet-names (:name pet))
+                                  (next pets)))))]
+                 (recur pet-count pet-names
+                        people)))))
 
-      (println "\nSingle-acc reduce over nested seq")
-      (quick-bench
-        (reduce (fn [pet-count person]
-                  (reduce (fn [pet-count pet]
-                            (inc pet-count))
-                          pet-count
-                          (:pets person)))
-                0
-                people))
+         (println "\nMulti-acc reduce over nested seq")
+         (quick-bench
+           (reduce (fn [acc person]
+                     (reduce (fn [[pet-count pet-names] pet]
+                               [(inc pet-count)
+                                (conj pet-names (:name pet))])
+                             acc
+                             (:pets person)))
+                   [0 #{}]
+                   people))
 
-      (println "\nSingle-acc loopr over nested seq")
-      (quick-bench
-        (loopr [pet-count 0]
-               [person people
-                pet    (:pets person)]
-               (recur (inc pet-count))))
+         (println "\nMulti-acc loopr over nested seq")
+         (quick-bench
+           (loopr [pet-count 0
+                   pet-names #{}]
+                  [person people
+                   pet    (:pets person)]
+                  (recur (inc pet-count)
+                         (conj pet-names (:name pet)))))))
 
-      (println "\nMulti-acc loop with seq over nested seq")
-      (quick-bench
-        (loop [pet-count    0
-               pet-names    #{}
-               people       people]
-          (if-not (seq people)
-            [pet-count pet-names]
-            (let [[person & people] people
-                  [pet-count pet-names]
-                  (loop [pet-count pet-count
-                         pet-names pet-names
-                         pets      (:pets person)]
-                    (if-not (seq pets)
-                      [pet-count pet-names]
-                      (let [pet (first pets)]
-                        (recur (inc pet-count)
-                               (conj pet-names (:name pet))
-                               (next pets)))))]
-              (recur pet-count pet-names
-                     people)))))
+     (testing "arrays"
+       (let [ary (long-array (range 10000))]
+         (println "\nSingle-acc reduce over array")
+         (quick-bench
+           (reduce + ary))
 
-      (println "\nMulti-acc reduce over nested seq")
-      (quick-bench
-        (reduce (fn [acc person]
-                  (reduce (fn [[pet-count pet-names] pet]
-                            [(inc pet-count)
-                             (conj pet-names (:name pet))])
-                          acc
-                          (:pets person)))
-                [0 #{}]
-                people))
+         (println "\nSingle-acc loopr over array")
+         (quick-bench
+           (loopr [sum 0]
+                  [x ary :via :array]
+                  (recur (+ sum x)))))
 
-      (println "\nMulti-acc loopr over nested seq")
-      (quick-bench
-        (loopr [pet-count 0
-                pet-names #{}]
-               [person people
-                pet    (:pets person)]
-               (recur (inc pet-count)
-                      (conj pet-names (:name pet)))))))
+       (let [matrix (to-array-2d (repeat 1000 (range 1000)))]
+         (println "\nSingle-acc reduce over 2d array")
+         (quick-bench
+           (reduce (partial reduce +) 0 matrix))
 
-  (testing "arrays"
-    (let [ary (long-array (range 10000))]
-      (println "\nSingle-acc reduce over array")
-      (quick-bench
-        (reduce + ary))
-
-      (println "\nSingle-acc loopr over array")
-      (quick-bench
-        (loopr [sum 0]
-               [x ary :via :array]
-               (recur (+ sum x)))))
-
-    (let [matrix (to-array-2d (repeat 1000 (range 1000)))]
-      (println "\nSingle-acc reduce over 2d array")
-      (quick-bench
-        (reduce (partial reduce +) 0 matrix))
-
-      (println "\nSingle-acc loopr over 2d array")
-      (quick-bench
-        (loopr [sum 0]
-               [row                     matrix :via :array
-                x   ^"[Ljava.lang.Long;" row    :via :array]
-               (recur (+ sum x)))))
-    ))
+         (println "\nSingle-acc loopr over 2d array")
+         (quick-bench
+           (loopr [sum 0]
+                  [row                     matrix :via :array
+                   x   ^"[Ljava.lang.Long;" row    :via :array]
+                  (recur (+ sum x)))))
+       )))
