@@ -431,13 +431,17 @@
   [f form]
   (if-not (seq? form)
     (f form)
-    (case (first form)
-      (do let let* letfn* letfn)
+    (case (symbol (name (first form)))
+      (do let let* letfn* letfn letr)
       (list* (concat (butlast form) [(rewrite-tails* f (last form))]))
 
-      if
-      (let [[_ test t-branch f-branch] form]
-        (list 'if test (rewrite-tails* f t-branch) (rewrite-tails* f f-branch)))
+      (if if-let if-let*)
+      (let [[verb test t-branch f-branch] form]
+        (list verb test (rewrite-tails* f t-branch) (rewrite-tails* f f-branch)))
+
+      (when when-let when-let*)
+      (let [[verb test body] form]
+        (list verb test (rewrite-tails* f body)))
 
       case*
       (let [[a b c d default clauses & more] form]
