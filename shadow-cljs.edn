@@ -1,0 +1,11 @@
+{:source-paths
+ ["src"
+  "test"]
+
+ :dependencies [[riddley "0.2.0"]
+                [net.cgrand/macrovich "0.2.1"]]
+
+ :builds {:ci
+          {:target    :karma
+           :output-to "test-assets/karma/ci.js"
+           :ns-regexp "-test$"}}}
