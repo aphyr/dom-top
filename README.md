@@ -23,6 +23,10 @@ examples.
   dimensions. It combines the nested iteration of `for`, the multiple
   accumulators/dimensions of `loop`, and the concise iteration/accumulation
   structure of `reduce`. Also, it's fast.
+- `reducer` builds a reducing function for multiple accumulators, carrying
+  state in a dynamically-compiled, primitive-aware, mutable accumulator
+  datatype. For simple reductions it's about twice as fast as an idiomatic
+  vector accumulator.
 - `real-pmap` provides a fully parallel version of `map`, which spawns one
   thread per element, instead of running on a limited threadpool.
 - `with-retry` provides `recur` that works through `try/catch` blocks;

@@ -1,6 +1,7 @@
 (ns dom-top.core-test
   (:require [clojure [pprint :refer [pprint]]
                      [test :refer :all]]
+            [clj-commons.primitive-math :as prim]
             [criterium.core :refer [bench quick-bench]]
             [dom-top.core :refer :all])
   (:import (java.util.concurrent BrokenBarrierException
@@ -578,6 +579,16 @@
                 [0 #{}]
                 people))
 
+      (println "\nMulti-acc for->reduce over nested seq")
+      (quick-bench
+        (->> (for [person people
+                   pet    (:pets person)]
+               (:name pet))
+             (reduce (fn [[pet-count pet-names] pet-name]
+                       [(inc pet-count)
+                        (conj pet-names pet-name)])
+                     [0 #{}])))
+
       (println "\nMulti-acc loopr over nested seq")
       (quick-bench
         (loopr [pet-count 0
@@ -585,7 +596,8 @@
                [person people
                 pet    (:pets person)]
                (recur (inc pet-count)
-                      (conj pet-names (:name pet)))))))
+                      (conj pet-names (:name pet)))))
+      ))
 
   (testing "arrays"
     (let [ary (long-array (range 10000))]
@@ -611,3 +623,187 @@
                 x   ^"[Ljava.lang.Long;" row    :via :array]
                (recur (+ sum x)))))
     ))
+
+
+(deftest reducer-test
+  (testing "no acc"
+    (is (= :done (transduce identity
+                            (reducer []
+                                     [x]
+                                     (recur)
+                                     :done)
+                            [1 2 3])))
+
+    (testing "early return"
+      (is (= 2 (transduce identity
+                          (reducer []
+                                   [x]
+                                   (if (< 1 x)
+                                     x
+                                     (recur)))
+                          [1 2 3])))))
+
+  (testing "single acc"
+    (is (= [:sum 10] (transduce identity
+                                (reducer [sum 0]
+                                         [x]
+                                         (recur (+ sum x))
+                                         [:sum sum])
+                                [1 2 3 4])))
+
+    (testing "early return"
+      (is (= [:sum 6] (transduce identity
+                                 (reducer [sum 0]
+                                          [x]
+                                          (if (< 3 x)
+                                            sum
+                                            (recur (+ sum x)))
+                                          [:sum sum])
+                                 (range))))))
+
+  (testing "two accs"
+    (is (= 5/3 (transduce identity
+                          (reducer [sum   0
+                                    count 0]
+                                   [x]
+                                   (recur (+ sum x) (inc count))
+                                   (/ sum count))
+                          [1 2 2])))
+
+    (testing "type hints"
+      (is (= 5/3 (transduce identity
+                            (reducer [^long sum   0
+                                      ^int  count 0]
+                                     [x]
+                                     (recur (+ sum x) (inc count))
+                                     (/ sum count))
+                            [1 2 2]))))
+
+    (testing "destructuring"
+      (is (= {:cats 5/2
+              :dogs 11/2}
+             (transduce identity
+                        (reducer [[cat-sum cat-count :as cat-acc] [0 0]
+                                  [dog-sum dog-count :as dog-acc] [0 0]]
+                                 [{:keys [cuteness type]}]
+                                 (case type
+                                   :cat (recur [(+ cuteness cat-sum)
+                                                (inc cat-count)]
+                                               dog-acc)
+                                   :dog (recur cat-acc
+                                               [(+ cuteness dog-sum)
+                                                (inc dog-count)]))
+                                 {:cats (/ cat-sum cat-count)
+                                  :dogs (/ dog-sum dog-count)})
+                        [{:type :cat, :cuteness 2}
+                         {:type :cat, :cuteness 3}
+                         {:type :dog, :cuteness 4}
+                         {:type :dog, :cuteness 7}]))))
+
+    (testing "early return"
+      ; Note that transduce passes reduced values to the final (f acc) arity
+      (is (= [:final [:early 5]]
+             (transduce identity
+                        (reducer [sum 0, count 0 :as acc]
+                                 [x]
+                                 (if (= count 2)
+                                   [:early sum]
+                                   (recur (+ sum x) (inc count)))
+                                 [:final acc])
+                        [4 1 9 9 9]))))
+
+    (testing "early return, no final"
+      (is (= [:early 5]
+             (transduce identity
+                        (reducer [sum 0, count 0]
+                                 [x]
+                                 (if (= count 2)
+                                   [:early sum]
+                                   (recur (+ sum x) (inc count))))
+                        [4 1 9 9 9]))))
+    ))
+
+(binding [*warn-on-reflection* true
+          *unchecked-math* :warn-on-boxed]
+  (deftest ^:perf reducer-perf-test
+    (let [bigvec (->> (range 100000) vec)]
+      (testing "multiple accumulators"
+        (println "\nRegular vector destructuring")
+        (quick-bench
+          (transduce identity
+                     (fn
+                       ([] [0 0])
+                       ([[sum count]] (/ sum count))
+                       ([[sum count] x]
+                        [(+ sum x) (inc count)]))
+                     bigvec))
+
+        (println "\nReducer without types")
+        (quick-bench
+          (transduce identity
+                     (reducer [sum 0, count 0]
+                              [x]
+                              (recur (+ sum x) (inc count))
+                              (/ sum count))
+                     bigvec))
+
+
+        (println "\nReducer with types")
+        ; For reasons I can't explain this still winds up going through
+        ; RT.longCast. :-/
+        (quick-bench
+          (transduce identity
+                     (reducer [^long sum 0, ^long count 0]
+                              [^long x]
+                              (let [sum'   ^long (prim/+ sum x)
+                                    count' ^long (prim/inc count)]
+                                (recur sum' count'))
+                              (/ sum count))
+                     bigvec))
+
+        ))))
+
+(deftest mutable-acc-type-test
+  (testing "primitives"
+    (let [at (mutable-acc-type '[byte short int long float double])
+          a  (.newInstance at)]
+      (set! (.x0 a) (byte 1))
+      (set! (.x1 a) (short 2))
+      (set! (.x2 a) (int 3))
+      (set! (.x3 a) (long 4))
+      (set! (.x4 a) (float 1.23))
+      (set! (.x5 a) (double 4.56))
+      (is (identical? (byte 1)      (.x0 a)))
+      (is (identical? (short 2)     (.x1 a)))
+      (is (identical? (int 3)       (.x2 a)))
+      (is (identical? (long 4)      (.x3 a)))
+      ; Not sure about these
+      (is (= (float 1.23)  (.x4 a)))
+      (is (= (double 4.56) (.x5 a)))
+      ))
+
+  (testing "arrays"
+    (let [at (mutable-acc-type '[bytes shorts ints longs floats doubles objects])
+          a  (.newInstance at)]
+      (set! (.x0 a) (byte-array 1))
+      (set! (.x1 a) (short-array 1))
+      (set! (.x2 a) (int-array 1))
+      (set! (.x3 a) (long-array 1))
+      (set! (.x4 a) (float-array 1))
+      (set! (.x5 a) (double-array 1))
+      (set! (.x6 a) (object-array 1))
+      (is (= 0 (aget ^bytes (.x0 a) 0)))
+      (is (= 0 (aget ^shorts (.x1 a) 0)))
+      (is (= 0 (aget ^ints (.x2 a) 0)))
+      (is (= 0 (aget ^longs (.x3 a) 0)))
+      (is (= 0.0 (aget ^floats (.x4 a) 0)))
+      (is (= 0.0 (aget ^doubles (.x5 a) 0)))
+      (is (= nil (aget ^objects (.x6 a) 0)))))
+
+  (testing "objects"
+    (let [at (mutable-acc-type '[String Object])
+          a  (.newInstance at)]
+      (set! (.x0 a) "foo")
+      (set! (.x1 a) [1 2 3])
+      (is (= "foo" (.x0 a)))
+      (is (= [1 2 3] (.x1 a))))))
