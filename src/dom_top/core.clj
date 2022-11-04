@@ -999,9 +999,10 @@
                      ; Bindings like [foo init, _ (set! (. acc x0) foo), ...]
                      ~@(mapcat (fn [acc-name field init]
                                  ; Can't type hint locals with primitive inits
-                                 [(vary-meta acc-name dissoc :tag) init
-                                  '_ `(set! ~field ~init)])
-                               acc-names get-fields acc-inits)]
+                                 (let [acc (vary-meta acc-name dissoc :tag)]
+                                   [acc init
+                                    '_ (list 'set! field acc)]))
+                                 acc-names get-fields acc-inits)]
                  ~acc-name))
            ; Finalizer; destructure and evaluate final, or just return accs as
            ; vector
