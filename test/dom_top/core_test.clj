@@ -679,6 +679,14 @@
                                      (/ sum count))
                             [1 2 2]))))
 
+    (testing "referring to earlier accs in init bindings"
+      (is (= [:b :a] (transduce identity
+                                (reducer [a :a
+                                          b [:b a]]
+                                         [x]
+                                         b)
+                                [1 2 3]))))
+
     (testing "destructuring"
       (is (= {:cats 5/2
               :dogs 11/2}
