@@ -850,7 +850,7 @@
             `(let [~acc ~res] ~final)
             res)))))
 
-(def mutable-acc-cache*
+(defonce mutable-acc-cache*
   "A mutable cache of mutable accumulator types we've generated. Stores a map
   of type hints (e.g. ['long 'Object]) to classes (e.g.
   MutableAcc-long-Object)."
