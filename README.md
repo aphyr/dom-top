@@ -38,7 +38,7 @@ Look, this is a judgement-free zone, OK? We all have our reasons.
 
 ## License
 
-Copyright © 2017, 2018 Kyle Kingsbury
+Copyright © 2017--2022 Kyle Kingsbury
 
 Distributed under the Eclipse Public License either version 1.0 or (at
 your option) any later version.
