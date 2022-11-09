@@ -280,7 +280,9 @@
     `(loop [~@initial-bindings]
        (let [~retval (try ~@body)]
          (if (instance? Retry ~retval)
-           (recur ~@(map (fn [i] `(nth (.bindings ~retval) ~i))
+           (recur ~@(map (fn [i] (let [retval (vary-meta retval
+                                                         assoc :tag `Retry)]
+                                   `(nth (.bindings ~retval) ~i)))
                               (range bindings-count)))
            ~retval)))))
 

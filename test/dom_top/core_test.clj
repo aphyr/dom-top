@@ -7,6 +7,10 @@
   (:import (java.util.concurrent BrokenBarrierException
                                  CyclicBarrier)))
 
+(use-fixtures :once (fn [run-tests]
+                      (binding [*warn-on-reflection* true]
+                        (run-tests))))
+
 (deftest assert+-test
   (testing "passthrough"
     (is (= :foo (assert+ :foo)))
