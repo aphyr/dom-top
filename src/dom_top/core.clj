@@ -924,8 +924,9 @@
                                (type->desc t) nil nil)
               (.visitEnd)))
           ; And load
-          (let [klass (-> (RT/makeClassLoader)
-                          (.defineClass class-name (.toByteArray cv) nil))]
+          (let [bytes ^bytes (.toByteArray cv)
+                loader ^clojure.lang.DynamicClassLoader (RT/makeClassLoader)
+                klass (.defineClass loader class-name bytes nil)]
             (swap! mutable-acc-cache* assoc types klass)
             klass)))))
 
