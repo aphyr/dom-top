@@ -3,9 +3,12 @@
   (:require [clojure [pprint :refer [pprint]]
                      [string :as str]
                      [walk :as walk]]
+            [clojure.java.io :as io]
             [riddley.walk :refer [macroexpand-all walk-exprs]])
   (:import (java.lang Iterable)
            (java.util Iterator)
+           (java.io File
+                    FileOutputStream)
            ; oh no
            (clojure.asm ClassVisitor
                         ClassWriter
@@ -859,6 +862,13 @@
             res)))))
 
 (defonce
+  ^{:doc "The classloader we use to load mutable acc-types. We store this to
+         prevent it from being GCed and rendering types unusable."
+    :tag 'clojure.lang.DynamicClassLoader}
+  mutable-acc-class-loader
+  (RT/makeClassLoader))
+
+(defonce
   ^{:doc "A mutable cache of mutable accumulator types we've generated. Stores
          a map of type hints (e.g. ['long 'Object]) to classes (e.g.
          MutableAcc-long-Object)."}
@@ -887,6 +897,21 @@
       ; Everything else is an Object for us
       (Type/getType Object))))
 
+(defn load-class!
+  "Takes a class name as a string (e.g. foo.bar.Baz) and bytes for its class
+  file. Loads the class dynamically, and also emits those bytes to
+  *compile-path*, for AOT. Returns class."
+  [^String class-name ^bytes class-bytes]
+  (let [klass (.defineClass mutable-acc-class-loader class-name class-bytes nil)
+        ; Spit out bytes to compile-path as well
+        class-file (io/file *compile-path*
+                            (str (str/replace class-name "." File/separator)
+                                 ".class"))]
+    (io/make-parents class-file)
+    (with-open [out (FileOutputStream. class-file)]
+      (.write out class-bytes))
+    klass))
+
 (defn mutable-acc-type
   "Takes a list of types as symbols and returns the class of a mutable
   accumulator which can store those types. May compile new classes on the fly,
@@ -901,7 +926,7 @@
                         'Object))
                     types)]
     (or (get @mutable-acc-cache* types)
-        (let [class-name (str "dom-top.core.MutableAcc-"
+        (let [class-name (str "dom_top.core.MutableAcc-"
                               (str/join "-" (map name types)))
               base-type "java/lang/Object"
               ; Construct class bytecode
@@ -926,9 +951,8 @@
                                (type->desc t) nil nil)
               (.visitEnd)))
           ; And load
-          (let [bytes ^bytes (.toByteArray cv)
-                loader ^clojure.lang.DynamicClassLoader (RT/makeClassLoader)
-                klass (.defineClass loader class-name bytes nil)]
+          (let [klass (load-class! class-name (.toByteArray cv))]
+            ; Cache class for reuse
             (swap! mutable-acc-cache* assoc types klass)
             klass)))))
 
@@ -1014,7 +1038,7 @@
                    `(reduced ~form)))
                body))))
       ; What kind of types does our accumulator need?
-      (let [types    (map (comp :tag meta) acc-names)
+      (let [types    (mapv (comp :tag meta) acc-names)
             acc-type (symbol (.getName ^Class (mutable-acc-type types)))
             acc-name (with-meta (gensym "acc-") {:tag acc-type})
             fields   (->> (range (count types))
@@ -1033,7 +1057,7 @@
             ; The argument passed to our final arity
             final-name (gensym "final-")]
         `(fn ~(symbol (str "reduce-" element-name))
-           ; Construct accumulator and initialize its fields
+           ; Construct accumulator and initialize its fields.
            ([] (let [~acc-name (new ~acc-type)
                      ; Bindings like [foo init, _ (set! (. acc x0) foo), ...]
                      ~@(mapcat (fn [acc-name field init]
