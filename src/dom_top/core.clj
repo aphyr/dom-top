@@ -1009,7 +1009,7 @@
                           (recur (+ sum x) (inc count)))
                         [:final acc])
                [4 1 9 9 9])
-    ; => [:early 5]"
+    ; => [:final [:early 5]]"
   [accumulator-bindings element-bindings body & [final]]
   (assert (even? (count accumulator-bindings)))
   (assert (= 1 (count element-bindings)))
