@@ -359,8 +359,17 @@
                        x    pair  :via :iterator]
                       (if (= x 3)
                         {:x x, :i i}
-                        (recur (inc i))))
-               )))))
+                        (recur (inc i))))))))
+
+    (testing "with nil final expression"
+      ; This is a search for "the element after 2" on a list where 2 is the
+      ; final element.
+      (is (= nil (loopr [preceding nil]
+                        [x [1 2]]
+                        (if (= preceding 2)
+                          x
+                          (recur x))
+                        nil)))))
 
   (testing "no accumulator"
     (testing "reduce"

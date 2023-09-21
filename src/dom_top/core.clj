@@ -816,10 +816,11 @@
              (recur))
            :not-found)
     ; => :y"
-  [accumulator-bindings element-bindings body & [final]]
+  [accumulator-bindings element-bindings body & [final :as final-forms]]
   (assert (<= 2 (count element-bindings))) ; TODO: determine semantics for this?
   (assert (even? (count accumulator-bindings)))
   (assert (even? (count element-bindings)))
+  (assert (<= (count final-forms) 1))
   ; Parse element bindings into a vector of maps
   (let [element-bindings
         (loop [forms     element-bindings
@@ -857,7 +858,7 @@
            ~res ~(loopr-helper accumulator-bindings element-bindings body opts)]
        (if (instance? Return ~res)
          (.value ~(vary-meta res assoc :tag `Return))
-         ~(if final
+         ~(if (= 1 (count final-forms)) ; final could be present and nil
             `(let [~acc ~res] ~final)
             res)))))
 
@@ -1010,9 +1011,10 @@
                         [:final acc])
                [4 1 9 9 9])
     ; => [:early 5]"
-  [accumulator-bindings element-bindings body & [final]]
+  [accumulator-bindings element-bindings body & [final :as final-forms]]
   (assert (even? (count accumulator-bindings)))
   (assert (= 1 (count element-bindings)))
+  (assert (<= (count final-forms) 1))
   (let [element-name (first element-bindings)
         [acc-bindings [_ acc-as-name]] (split-with (complement #{:as})
                                                    accumulator-bindings)
@@ -1069,7 +1071,7 @@
                  ~acc-name))
            ; Finalizer; destructure and evaluate final, or just return accs as
            ; vector
-           ~(if final
+           ~(if (= 1 (count final-forms)) ; final could be present and nil
               (if acc-as-name
                 `([~final-name]
                   ; Bind input to acc-as-name, converting our mutable accs to a
