@@ -36,6 +36,11 @@ examples.
 
 Look, this is a judgement-free zone, OK? We all have our reasons.
 
+## Thanks
+
+[Justin Conklin](https://github.com/jgpc42) offered advice on ASM and wrote the
+core of dom-top's generator of mutable accumulators.
+
 ## License
 
 Copyright © 2017--2022 Kyle Kingsbury
