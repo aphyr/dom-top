@@ -43,7 +43,7 @@ core of dom-top's generator of mutable accumulators.
 
 ## License
 
-Copyright © 2017--2022 Kyle Kingsbury
+Copyright © 2017--2023 Kyle Kingsbury
 
 Distributed under the Eclipse Public License either version 1.0 or (at
 your option) any later version.
