@@ -3,6 +3,7 @@
   (:require [clojure [pprint :refer [pprint]]
                      [string :as str]
                      [walk :as walk]]
+            [net.cgrand.macrovich :as macrovich]
             [clojure.java.io :as io]
             [riddley.walk :refer [macroexpand-all walk-exprs]])
   (:import (java.lang Iterable)
@@ -46,13 +47,24 @@
   ([x]
    `(assert+ ~x "Assert failed"))
   ([x message]
-   `(assert+ ~x IllegalArgumentException ~message))
+   (macrovich/case
+     :clj
+     `(assert+ ~x IllegalArgumentException ~message)
+
+     :cljs
+     `(assert+ ~x js/Error ~message)))
   ([x ex-type message]
    `(or ~x (throw (let [m# ~message]
                     (if (map? m#)
                       (ex-info (str "Assert failed:\n"
-                                   (with-out-str (pprint m#)))
-                               m#)
+                                   (with-out-str
+                                     (macrovich/case
+                                       :clj
+                                       (clojure.pprint/pprint m#)
+
+                                       :cljs
+                                       (cljs.pprint/pprint m#))))
+                        m#)
                       (new ~ex-type ^String m#)))))))
 
 (defmacro disorderly
@@ -285,7 +297,7 @@
          (if (instance? Retry ~retval)
            (recur ~@(map (fn [i] (let [retval (vary-meta retval
                                                          assoc :tag `Retry)]
-                                   `(nth (.bindings ~retval) ~i)))
+                                   `(nth ^Vector? (.-bindings ^Return ~retval) ~i)))
                               (range bindings-count)))
            ~retval)))))
 
@@ -351,7 +363,7 @@
           final-sym (nth bindings (- (count bindings) 2))]
       `(let ~bindings
          (if (instance? Return ~final-sym)
-           (.value ~final-sym)
+           (.-value ~final-sym)
            ~(letr-let-if (rest groups) body))))))
 
 (defmacro letr
@@ -432,13 +444,17 @@
   [f form]
   (if-not (seq? form)
     (f form)
-    (case (first form)
-      (do let* letfn*)
+    (case (symbol (name (first form)))
+      (do let let* letfn* letfn letr)
       (list* (concat (butlast form) [(rewrite-tails* f (last form))]))
 
-      if
-      (let [[_ test t-branch f-branch] form]
-        (list 'if test (rewrite-tails* f t-branch) (rewrite-tails* f f-branch)))
+      (if if-let if-let*)
+      (let [[verb test t-branch f-branch] form]
+        (list verb test (rewrite-tails* f t-branch) (rewrite-tails* f f-branch)))
+
+      (when when-let when-let*)
+      (let [[verb test body] form]
+        (list verb test (rewrite-tails* f body)))
 
       case*
       (let [[a b c d default clauses & more] form]
@@ -470,17 +486,52 @@
         bname (:name eb)
         iter (gensym (str bname "-iter-"))
         res  (gensym (str bname "-res-"))
-        rhs  (vary-meta rhs assoc :tag `Iterable)]
-    `(let [~iter ^Iterator (.iterator ~rhs)]
+        next-val (gensym "next-val-")
+        next-obj (gensym "next-obj-")
+        done? (gensym "done?-")
+        rhs-inner (gensym "rhs-")]
+    `(let [~rhs-inner (macrovich/case
+                        :clj
+                        (vary-meta ~rhs assoc :tag `Iterable)
+
+                        :cljs
+                        ~rhs)
+           ~iter (macrovich/case
+                   :clj
+                   ^Iterator (.iterator ~rhs-inner)
+
+                   :cljs
+                   (.call (cljs.core/unchecked-get ~rhs-inner js/Symbol.iterator) ~rhs-inner))
+           ~next-val (macrovich/case
+                       :cljs
+                       (volatile! nil))
+           ~done? (macrovich/case
+                    :cljs
+                    (volatile! false))]
        ; Bind each accumulator to itself initially
        (loop [~@(mapcat (juxt identity identity) accs)]
-         (if-not (.hasNext ~iter)
+         (macrovich/case
+           :cljs
+           (let [~next-obj (.next ^js ~iter)]
+             (vreset! ~next-val (cljs.core/unchecked-get ~next-obj "value"))
+             (vreset! ~done? (cljs.core/unchecked-get ~next-obj "done"))))
+         (if-not (macrovich/case
+                   :clj
+                   (.hasNext ~iter)
+
+                   :cljs
+                   (not @~done?))
            ; We're done iterating
            ~(case (int acc-count)
               0 nil
               1 (first accs)
               `[~@accs])
-           (let [~lhs (.next ~iter)]
+           (let [~lhs (macrovich/case
+                        :clj
+                        (.next ~iter)
+
+                        :cljs
+                        @~next-val)]
              ~(if more-element-bindings
                 ; More iteration to do within. Descend, come back, recur.
                 `(let [~res ~(loopr-helper accumulator-bindings
@@ -529,7 +580,7 @@
                                           (gensym
                                             (if (symbol? acc)
                                               (str acc "-vol-")
-                                              (str i "-vol-"))))
+                                              (str "acc" i "-vol-"))))
                                         (next accs))
         ; A let binding vector for the initial values of our volatiles
         rest-acc-init-binding (when rest-accs
@@ -651,7 +702,7 @@
                                    `(Return. ~form)))
                                body))))))))
 
-(defn loopr-helper
+(defn loopr-helper-impl
   "Helper for building each stage of a nested loopr. Takes an accumulator
   binding vector, a vector of element bindings maps {:lhs, :rhs, :name}, a
   body expression, and an option map with
@@ -668,12 +719,13 @@
                      :reduce   loopr-reduce
                      ; With multiple accumulators, vector destructuring can
                      ; make reduce more expensive.
-                     nil (if (< 2 (count accumulator-bindings))
-                           loopr-iterator
-                           ; With single accumulators, Clojure's internal
-                           ; reduce is usually more efficient
-                           loopr-reduce))]
+                     nil loopr-reduce)]
       (strategy accumulator-bindings element-bindings body opts))))
+
+(defn loopr-helper
+  [accumulator-bindings element-bindings body opts]
+  (loopr-helper-impl accumulator-bindings element-bindings body opts))
+
 
 (defmacro loopr
   "Like `loop`, but for reducing over (possibly nested) collections. Compared to
@@ -833,10 +885,10 @@
                 ; Options for last binding
                 (case f1
                   :via (recur fs (update bindings (dec i) assoc :via f2))
-                  (throw (IllegalArgumentException.
-                           (str "Unrecognized element binding option: "
-                                (pr-str f1)
-                                " - expected :via"))))
+                  (let [msg (str "Unrecognized element binding option: "
+                                 (pr-str f1)
+                                 " - expected :via")]
+                    (throw (IllegalArgumentException. msg))))
                 ; New binding
                 (let [; Choose a friendly name for this binding.
                       binding-name (if (symbol? f1)
@@ -857,7 +909,7 @@
     `(let [~@accumulator-bindings
            ~res ~(loopr-helper accumulator-bindings element-bindings body opts)]
        (if (instance? Return ~res)
-         (.value ~(vary-meta res assoc :tag `Return))
+         (.-value ~(vary-meta res assoc :tag `Return))
          ~(if (= 1 (count final-forms)) ; final could be present and nil
             `(let [~acc ~res] ~final)
             res)))))
