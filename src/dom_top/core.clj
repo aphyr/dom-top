@@ -427,6 +427,7 @@
   (let [groups (letr-partition-bindings bindings)]
     (letr-let-if (letr-partition-bindings bindings) body)))
 
+
 (defn rewrite-tails*
   "Helper for rewrite-tails which doesn't macroexpand."
   [f form]
@@ -456,6 +457,283 @@
   expression in a do or let, both branches of an if, values of a case, etc."
   [f form]
   (rewrite-tails* f (macroexpand-all form)))
+
+
+;; Multi-accumulator reducers
+
+(defonce
+  ^{:doc "The classloader we use to load mutable acc-types. We store this to
+         prevent it from being GCed and rendering types unusable."
+    :tag 'clojure.lang.DynamicClassLoader}
+  mutable-acc-class-loader
+  (RT/makeClassLoader))
+
+(defonce
+  ^{:doc "A mutable cache of mutable accumulator types we've generated. Stores
+         a map of type hints (e.g. ['long 'Object]) to classes (e.g.
+         MutableAcc-long-Object)."}
+  mutable-acc-cache*
+  (atom {}))
+
+(defn type->desc
+  "Takes a type (e.g. 'int, 'objects, 'longs, 'Foo) and converts it to a JVM
+  type descriptor like \"I\"."
+  [t]
+  (.getDescriptor
+    (case t
+      byte          Type/BYTE_TYPE
+      short         Type/SHORT_TYPE
+      int           Type/INT_TYPE
+      long          Type/LONG_TYPE
+      float         Type/FLOAT_TYPE
+      double        Type/DOUBLE_TYPE
+      bytes         (Type/getType "[B")
+      shorts        (Type/getType "[S")
+      ints          (Type/getType "[I")
+      longs         (Type/getType "[J")
+      floats        (Type/getType "[F")
+      doubles       (Type/getType "[D")
+      objects       (Type/getType "[Ljava/lang/Object;")
+      ; Everything else is an Object for us
+      (Type/getType Object))))
+
+(defn literal->hint
+  "Takes a literal value, e.g. 0 and returns a type hint for it, like 'long.
+  For unknown types, returns nil. Normally Clojure is good about inferring type
+  hints, but there are places where our macros know type information at the top
+  level (e.g. a binding of [x 0]) but nested macros within them lack that type
+  information (having only 'x). It's helpful if we can provide them with
+  explicit type hints.
+
+  The obvious place for this would be to assign the hint to the meta tag of the
+  binding itself, like `^long x`. However, we *can't* do this, because Clojure
+  will complain that the (correct, but redundant) type hint is illegal with a
+  primitive RHS. So we have to thread this information around out-of-band."
+  [x]
+  (condp identical? (class x)
+    Long    'long
+    Integer 'int
+    Float   'float
+    Double  'double
+    nil))
+
+(defn load-class!
+  "Takes a class name as a string (e.g. foo.bar.Baz) and bytes for its class
+  file. Loads the class dynamically, and also emits those bytes to
+  *compile-path*, for AOT. Returns class."
+  [^String class-name ^bytes class-bytes]
+  (let [klass (.defineClass mutable-acc-class-loader class-name class-bytes nil)
+        ; Spit out bytes to compile-path as well
+        class-file (io/file *compile-path*
+                            (str (str/replace class-name "." File/separator)
+                                 ".class"))]
+    (io/make-parents class-file)
+    (with-open [out (FileOutputStream. class-file)]
+      (.write out class-bytes))
+    klass))
+
+(defn mutable-acc-type
+  "Takes a list of types as symbols and returns the class of a mutable
+  accumulator which can store those types. May compile new classes on the fly,
+  or re-use a cached class.
+
+  This method largely courtesy of Justin Conklin! *hat tip*"
+  [types]
+  (let [; All objects are the same as far as we're concerned.
+        types (mapv (fn [type]
+                      (if (and type (re-find #"^[a-z]" (name type)))
+                        type
+                        'Object))
+                    types)]
+    (or (get @mutable-acc-cache* types)
+        (let [class-name (str "dom_top.core.MutableAcc-"
+                              (str/join "-" (map name types)))
+              base-type "java/lang/Object"
+              ; Construct class bytecode
+              cv (doto (ClassWriter. ClassWriter/COMPUTE_FRAMES)
+                   (.visit Opcodes/V1_7
+                           (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_FINAL)
+                           (.replace class-name \. \/)
+                           nil base-type nil))]
+          ; Constructor
+          (doto (.visitMethod cv Opcodes/ACC_PUBLIC "<init>" "()V" nil nil)
+            (.visitCode)
+            (.visitVarInsn Opcodes/ALOAD 0)
+            ; Super
+            (.visitMethodInsn Opcodes/INVOKESPECIAL base-type
+                              "<init>" "()V" false)
+            (.visitInsn Opcodes/RETURN)
+            (.visitMaxs -1 -1)
+            (.visitEnd))
+          ; Fields
+          (doseq [[i t] (map vector (range) types)]
+            (doto (.visitField cv Opcodes/ACC_PUBLIC (str "x" i)
+                               (type->desc t) nil nil)
+              (.visitEnd)))
+          ; And load
+          (let [klass (load-class! class-name (.toByteArray cv))]
+            ; Cache class for reuse
+            (swap! mutable-acc-cache* assoc types klass)
+            klass)))))
+
+(defmacro reducer
+  "Syntactic sugar for writing reducing/transducing functions with multiple
+  accumulators. Much like `loopr`, this takes a binding vector of loop
+  variables and their initial values, a single-element binding vector for an
+  element of the collection, a body which calls (recur) with new values of the
+  accumulators (or doesn't recur, for early return), and a final expression,
+  which is evaluated with the accumulators and returned at the end of the
+  reduction. Returns a function with 0, 1, and 2-arity forms suitable for use
+  with `transduce`.
+
+    (transduce identity
+               (reducer [sum 0, count 0]
+                        [x]
+                        (recur (+ sum x) (inc count))
+                        (/ sum count))
+               [1 2 2])
+    ; => 5/3
+
+  This is logically equivalent to:
+
+    (transduce identity
+               (fn ([] [0 0])
+                   ([[sum count]] (/ sum count))
+                   ([[sum count] x]
+                    [(+ sum x) (inc count)]))
+               [1 2 2])
+
+  For zero and one-accumulator forms, these are equivalent. However, `reducer`
+  is faster for reducers with more than one accumulator. Its identity arity
+  creates unsynchronized mutable accumulators (including primitive types, if
+  you hint your accumulator variables), and the reduction arity mutates that
+  state in-place to skip the need for vector creation & destructuring on each
+  reduction step. This makes it about twice as fast as a plain old reducer fn.
+
+  These functions also work out-of-the-box with Tesser, clojure.core.reducers,
+  and other Clojure fold libraries.
+
+  If you want to use a final expression with a `reduced` form *and* multiple
+  accumulators, add an `:as foo` to your accumulator binding vector. This
+  symbol will be available in the final expression, bound to a vector of
+  accumulators if the reduction completes normally, or bound to whatever was
+  returned early. Using `:as foo` signals that you intend to use early return
+  and may not *have* accumulators any more--hence the accumulator bindings will
+  not be available in the final expression.
+
+    (transduce identity
+               (reducer [sum 0, count 0 :as acc]
+                        [x]
+                        (if (= count 2)
+                          [:early sum]
+                          (recur (+ sum x) (inc count)))
+                        [:final acc])
+               [4 1 9 9 9])
+    ; => [:early 5]"
+  [accumulator-bindings element-bindings body & [final :as final-forms]]
+  (assert (even? (count accumulator-bindings)))
+  (assert (= 1 (count element-bindings)))
+  (assert (<= (count final-forms) 1))
+  (let [element-name (first element-bindings)
+        [acc-bindings [_ acc-as-name]] (split-with (complement #{:as})
+                                                   accumulator-bindings)
+        acc-pairs    (partition 2 acc-bindings)
+        acc-names    (mapv first acc-pairs)
+        acc-inits    (mapv second acc-pairs)
+        acc-count    (count acc-names)]
+    (if (< acc-count 2)
+      ; Construct a plain old reducer
+      (let [acc-name (or (first acc-names) '_)]
+        `(fn ~(symbol (str "reduce-" element-name))
+           ([] ~(first acc-inits))
+           ([~acc-name] ~(if final final acc-name))
+           ([~acc-name ~element-name]
+            ~(rewrite-tails
+               (fn rewrite-tail [form]
+                 (if (and (seq? form) (= 'recur (first form)))
+                   ; We have a 0 or 1-arity recur form
+                   (let [[_ acc-value] form]
+                     (assert (= acc-count (count (rest form))))
+                     acc-value)
+                   ; Early return
+                   `(reduced ~form)))
+               body))))
+      ; What kind of types does our accumulator need?
+      (let [types    (mapv (comp :tag meta) acc-names)
+            acc-type (symbol (.getName ^Class (mutable-acc-type types)))
+            acc-name (with-meta (gensym "acc-") {:tag acc-type})
+            fields   (->> (range (count types))
+                          (map (comp symbol (partial str "x"))))
+            ; [(. acc x0) (. acc x1) ...]
+            get-fields (mapv (fn [type field]
+                               (with-meta (list '. acc-name field)
+                                          {:tag type}))
+                             types fields)
+            ; [foo (. acc x0) bar (. acc x1) ...]
+            ; When we bind we want to strip hints off locals; compiler will
+            ; complain
+            bind-fields (vec (interleave
+                               (map #(vary-meta % dissoc :tag) acc-names)
+                               get-fields))
+            ; The argument passed to our final arity
+            final-name (gensym "final-")]
+        `(fn ~(symbol (str "reduce-" element-name))
+           ; Construct accumulator and initialize its fields.
+           ([] (let [~acc-name (new ~acc-type)
+                     ; Bindings like [foo init, _ (set! (. acc x0) foo), ...]
+                     ~@(mapcat (fn [acc-name field init]
+                                 ; Can't type hint locals with primitive inits
+                                 (let [acc (vary-meta acc-name dissoc :tag)]
+                                   [acc init
+                                    '_ (list 'set! field acc)]))
+                                 acc-names get-fields acc-inits)]
+                 ~acc-name))
+           ; Finalizer; destructure and evaluate final, or just return accs as
+           ; vector
+           ~(if (= 1 (count final-forms)) ; final could be present and nil
+              (if acc-as-name
+                `([~final-name]
+                  ; Bind input to acc-as-name, converting our mutable accs to a
+                  ; vector.
+                  (if (instance? ~acc-type ~final-name)
+                    ; Normal return
+                    (let [~acc-name ~final-name
+                          ~acc-as-name ~get-fields]
+                      ~final)
+                    ; Early return
+                    (let [~acc-as-name ~final-name]
+                      ~final)))
+                ; No early return. Just bind accs.
+                `([~acc-name]
+                  (let [~@bind-fields]
+                    ~final)))
+              ; No final expression; return reduced or a vector
+              `([~final-name]
+                (if (instance? ~acc-type ~final-name)
+                  ; Normal return
+                  (let [~acc-name ~final-name]
+                    ~get-fields)
+                  ; Early return
+                  ~final-name)))
+           ; Reduce: destructure acc and turn recur into mutations
+           ([~acc-name ~element-name]
+            (let ~bind-fields
+              ~(rewrite-tails
+                 (fn rewrite-tail [form]
+                   (if (and (seq? form) (= 'recur (first form)))
+                     ; Recur becomes mutate and return acc
+                     (do (assert (= acc-count (count (rest form))))
+                         `(do ~@(map (fn [get-field value]
+                                      `(set! ~get-field ~value))
+                                    get-fields
+                                    (rest form))
+                              ~acc-name))
+                     ; Early return becomes a reduced value
+                     `(reduced ~form)))
+                 body))))))))
+
+
+;; Loopr
 
 (declare loopr-helper)
 
@@ -604,6 +882,74 @@
              [~reduce-res
               ~@(map (partial list `deref) rest-acc-volatiles)])))))
 
+(defn loopr-reducer
+  "A single loopr layer specialized for traversal using `reduce` and a
+  `reducer`-built mutable accumulator. Builds a form which returns a single
+  accumulator, or a vector of accumulators, or a Return, after traversing each
+  x in xs (and more element bindings within). Reduce is often faster over
+  Clojure data structures than an iterator."
+  [accumulator-bindings
+   [{:keys [lhs rhs] :as eb} & more-element-bindings]
+   body
+   {:keys [acc-count] :as opts}]
+  (let [; Just the names of our accumulators
+        accs (mapv first (partition 2 accumulator-bindings))
+        ; We want to take those bindings from the surrounding scope: [x x, y y].
+        ; This will be the bindings that we pass to `reducer`. However,
+        ; `reducer` wants hints on those bindings so that it can generate an
+        ; efficient accumulator class! We use hints on the binding variables
+        ; themselves, or infer them from the binding values, if literal.
+        acc-bindings (mapcat (fn acc-bindings [[lhs rhs]]
+                               [(if-let [tag (or (:tag (meta lhs))
+                                                 (:tag (meta rhs))
+                                                 (literal->hint rhs))]
+                                         (vary-meta lhs assoc :tag tag)
+                                         lhs)
+                                ; We bind each value to itself, so we
+                                ; pick up the enclosing scope's values.
+                                lhs])
+                              (partition 2 accumulator-bindings))
+        ; Stores the result of the inner loop
+        inner-res (gensym 'inner-res-)
+        ; Stores the result of our reduce
+        reduce-res (gensym 'res-)]
+    ; Transduce is basically reduce, but takes care of the plumbing around
+    ; init/final value transformation.
+    `(transduce
+       identity
+       (reducer [~@acc-bindings :as ~reduce-res]
+                [~lhs]
+                ~(if more-element-bindings
+                   ; More iteration within!
+                   `(let [~inner-res ~(loopr-helper accumulator-bindings
+                                                    more-element-bindings
+                                                    body opts)]
+                      (prn :inner-res ~inner-res)
+                      ; Early return?
+                      (if (instance? Return ~inner-res)
+                        ~inner-res
+                        ; Standard return; we need to recur
+                        ~(case (count accs)
+                           ; With no accumulators, just recur
+                           0 `(recur)
+                           ; With a single accumulator, recur with inner-res
+                           1 `(recur ~inner-res)
+                           ; With multiple accumulators, destructure inner-res
+                           ; as a vector.
+                           2 `(let [~accs ~inner-res]
+                                (recur ~@accs)))))
+                   ; This is the deepest level; the body goes here. We make a
+                   ; small rewrite here: any early returns are wrapped
+                   ; in a Return.
+                   (rewrite-tails
+                     (fn rewrite-tails [form]
+                       (if (and (seq? form) (= 'recur (first form)))
+                         ; Recurs pass through
+                         form
+                         ; Non-recurs we wrap
+                         `(Return. ~form)))
+                     body)))
+       ~rhs)))
 
 (defn loopr-array
   "A single loopr layer specialized for traversal over arrays. Builds a form
@@ -663,9 +1009,10 @@
     body
     ; Generate an iterator loop around the top-level element bindings.
     (let [strategy (case (:via (first element-bindings))
-                     :array    loopr-array
-                     :iterator loopr-iterator
-                     :reduce   loopr-reduce
+                     :array     loopr-array
+                     :iterator  loopr-iterator
+                     :reduce    loopr-reduce
+                     :reducer   loopr-reducer
                      ; With multiple accumulators, vector destructuring can
                      ; make reduce more expensive.
                      nil (if (< 2 (count accumulator-bindings))
@@ -821,7 +1168,7 @@
   (assert (even? (count accumulator-bindings)))
   (assert (even? (count element-bindings)))
   (assert (<= (count final-forms) 1))
-  ; Parse element bindings into a vector of maps
+  ; Parse element bindings into a vector of maps.
   (let [element-bindings
         (loop [forms     element-bindings
                bindings  []]
@@ -854,261 +1201,13 @@
                       (vec acc-names))
         opts        {:acc-count acc-count}
         res         (gensym 'res-)]
-    `(let [~@accumulator-bindings
+    `(let [; These bindings establish initial values for the accumulators, so we
+           ; can refer to them by name in nested forms.
+           ~@accumulator-bindings
            ~res ~(loopr-helper accumulator-bindings element-bindings body opts)]
+       (prn :res ~res)
        (if (instance? Return ~res)
          (.value ~(vary-meta res assoc :tag `Return))
          ~(if (= 1 (count final-forms)) ; final could be present and nil
             `(let [~acc ~res] ~final)
             res)))))
-
-(defonce
-  ^{:doc "The classloader we use to load mutable acc-types. We store this to
-         prevent it from being GCed and rendering types unusable."
-    :tag 'clojure.lang.DynamicClassLoader}
-  mutable-acc-class-loader
-  (RT/makeClassLoader))
-
-(defonce
-  ^{:doc "A mutable cache of mutable accumulator types we've generated. Stores
-         a map of type hints (e.g. ['long 'Object]) to classes (e.g.
-         MutableAcc-long-Object)."}
-  mutable-acc-cache*
-  (atom {}))
-
-(defn type->desc
-  "Takes a type (e.g. 'int, 'objects, 'longs, 'Foo) and converts it to a JVM
-  type descriptor like \"I\"."
-  [t]
-  (.getDescriptor
-    (case t
-      byte          Type/BYTE_TYPE
-      short         Type/SHORT_TYPE
-      int           Type/INT_TYPE
-      long          Type/LONG_TYPE
-      float         Type/FLOAT_TYPE
-      double        Type/DOUBLE_TYPE
-      bytes         (Type/getType "[B")
-      shorts        (Type/getType "[S")
-      ints          (Type/getType "[I")
-      longs         (Type/getType "[J")
-      floats        (Type/getType "[F")
-      doubles       (Type/getType "[D")
-      objects       (Type/getType "[Ljava/lang/Object;")
-      ; Everything else is an Object for us
-      (Type/getType Object))))
-
-(defn load-class!
-  "Takes a class name as a string (e.g. foo.bar.Baz) and bytes for its class
-  file. Loads the class dynamically, and also emits those bytes to
-  *compile-path*, for AOT. Returns class."
-  [^String class-name ^bytes class-bytes]
-  (let [klass (.defineClass mutable-acc-class-loader class-name class-bytes nil)
-        ; Spit out bytes to compile-path as well
-        class-file (io/file *compile-path*
-                            (str (str/replace class-name "." File/separator)
-                                 ".class"))]
-    (io/make-parents class-file)
-    (with-open [out (FileOutputStream. class-file)]
-      (.write out class-bytes))
-    klass))
-
-(defn mutable-acc-type
-  "Takes a list of types as symbols and returns the class of a mutable
-  accumulator which can store those types. May compile new classes on the fly,
-  or re-use a cached class.
-
-  This method largely courtesy of Justin Conklin! *hat tip*"
-  [types]
-  (let [; All objects are the same as far as we're concerned.
-        types (mapv (fn [type]
-                      (if (and type (re-find #"^[a-z]" (name type)))
-                        type
-                        'Object))
-                    types)]
-    (or (get @mutable-acc-cache* types)
-        (let [class-name (str "dom_top.core.MutableAcc-"
-                              (str/join "-" (map name types)))
-              base-type "java/lang/Object"
-              ; Construct class bytecode
-              cv (doto (ClassWriter. ClassWriter/COMPUTE_FRAMES)
-                   (.visit Opcodes/V1_7
-                           (bit-or Opcodes/ACC_PUBLIC Opcodes/ACC_FINAL)
-                           (.replace class-name \. \/)
-                           nil base-type nil))]
-          ; Constructor
-          (doto (.visitMethod cv Opcodes/ACC_PUBLIC "<init>" "()V" nil nil)
-            (.visitCode)
-            (.visitVarInsn Opcodes/ALOAD 0)
-            ; Super
-            (.visitMethodInsn Opcodes/INVOKESPECIAL base-type
-                              "<init>" "()V" false)
-            (.visitInsn Opcodes/RETURN)
-            (.visitMaxs -1 -1)
-            (.visitEnd))
-          ; Fields
-          (doseq [[i t] (map vector (range) types)]
-            (doto (.visitField cv Opcodes/ACC_PUBLIC (str "x" i)
-                               (type->desc t) nil nil)
-              (.visitEnd)))
-          ; And load
-          (let [klass (load-class! class-name (.toByteArray cv))]
-            ; Cache class for reuse
-            (swap! mutable-acc-cache* assoc types klass)
-            klass)))))
-
-(defmacro reducer
-  "Syntactic sugar for writing reducing/transducing functions with multiple
-  accumulators. Much like `loopr`, this takes a binding vector of loop
-  variables and their initial values, a single binding vector for an element of
-  the collection, a body which calls (recur) with new values of the
-  accumulators (or doesn't recur, for early return), and a final expression,
-  which is evaluated with the accumulators and returned at the end of the
-  reduction. Returns a function with 0, 1, and 2-arity forms suitable for use
-  with `transduce`.
-
-    (transduce identity
-               (reducer [sum 0, count 0]
-                        [x]
-                        (recur (+ sum x) (inc count))
-                        (/ sum count))
-               [1 2 2])
-    ; => 5/3
-
-  This is logically equivalent to:
-
-    (transduce identity
-               (fn ([] [0 0])
-                   ([[sum count]] (/ sum count))
-                   ([[sum count] x]
-                    [(+ sum x) (inc count)]))
-               [1 2 2])
-
-  For zero and one-accumulator forms, these are equivalent. However, `reducer`
-  is faster for reducers with more than one accumulator. Its identity arity
-  creates unsynchronized mutable accumulators (including primitive types, if
-  you hint your accumulator variables), and the reduction arity mutates that
-  state in-place to skip the need for vector creation & destructuring on each
-  reduction step. This makes it about twice as fast as a plain old reducer fn.
-
-  These functions also work out-of-the-box with Tesser, clojure.core.reducers,
-  and other Clojure fold libraries.
-
-  If you want to use a final expression with a `reduced` form *and* multiple
-  accumulators, add an `:as foo` to your accumulator binding vector. This
-  symbol will be available in the final expression, bound to a vector of
-  accumulators if the reduction completes normally, or bound to whatever was
-  returned early. Using `:as foo` signals that you intend to use early return
-  and may not *have* accumulators any more--hence the accumulator bindings will
-  not be available in the final expression.
-
-    (transduce identity
-               (reducer [sum 0, count 0 :as acc]
-                        [x]
-                        (if (= count 2)
-                          [:early sum]
-                          (recur (+ sum x) (inc count)))
-                        [:final acc])
-               [4 1 9 9 9])
-    ; => [:early 5]"
-  [accumulator-bindings element-bindings body & [final :as final-forms]]
-  (assert (even? (count accumulator-bindings)))
-  (assert (= 1 (count element-bindings)))
-  (assert (<= (count final-forms) 1))
-  (let [element-name (first element-bindings)
-        [acc-bindings [_ acc-as-name]] (split-with (complement #{:as})
-                                                   accumulator-bindings)
-        acc-pairs    (partition 2 acc-bindings)
-        acc-names    (mapv first acc-pairs)
-        acc-inits    (mapv second acc-pairs)
-        acc-count    (count acc-names)]
-    (if (< acc-count 2)
-      ; Construct a plain old reducer
-      (let [acc-name (or (first acc-names) '_)]
-        `(fn ~(symbol (str "reduce-" element-name))
-           ([] ~(first acc-inits))
-           ([~acc-name] ~(if final final acc-name))
-           ([~acc-name ~element-name]
-            ~(rewrite-tails
-               (fn rewrite-tail [form]
-                 (if (and (seq? form) (= 'recur (first form)))
-                   ; We have a 0 or 1-arity recur form
-                   (let [[_ acc-value] form]
-                     (assert (= acc-count (count (rest form))))
-                     acc-value)
-                   ; Early return
-                   `(reduced ~form)))
-               body))))
-      ; What kind of types does our accumulator need?
-      (let [types    (mapv (comp :tag meta) acc-names)
-            acc-type (symbol (.getName ^Class (mutable-acc-type types)))
-            acc-name (with-meta (gensym "acc-") {:tag acc-type})
-            fields   (->> (range (count types))
-                          (map (comp symbol (partial str "x"))))
-            ; [(. acc x0) (. acc x1) ...]
-            get-fields (mapv (fn [type field]
-                               (with-meta (list '. acc-name field)
-                                          {:tag type}))
-                             types fields)
-            ; [foo (. acc x0) bar (. acc x1) ...]
-            ; When we bind we want to strip hints off locals; compiler will
-            ; complain
-            bind-fields (vec (interleave
-                               (map #(vary-meta % dissoc :tag) acc-names)
-                               get-fields))
-            ; The argument passed to our final arity
-            final-name (gensym "final-")]
-        `(fn ~(symbol (str "reduce-" element-name))
-           ; Construct accumulator and initialize its fields.
-           ([] (let [~acc-name (new ~acc-type)
-                     ; Bindings like [foo init, _ (set! (. acc x0) foo), ...]
-                     ~@(mapcat (fn [acc-name field init]
-                                 ; Can't type hint locals with primitive inits
-                                 (let [acc (vary-meta acc-name dissoc :tag)]
-                                   [acc init
-                                    '_ (list 'set! field acc)]))
-                                 acc-names get-fields acc-inits)]
-                 ~acc-name))
-           ; Finalizer; destructure and evaluate final, or just return accs as
-           ; vector
-           ~(if (= 1 (count final-forms)) ; final could be present and nil
-              (if acc-as-name
-                `([~final-name]
-                  ; Bind input to acc-as-name, converting our mutable accs to a
-                  ; vector.
-                  (if (instance? ~acc-type ~final-name)
-                    ; Normal return
-                    (let [~acc-name ~final-name
-                          ~acc-as-name ~get-fields]
-                      ~final)
-                    ; Early return
-                    (let [~acc-as-name ~final-name]
-                      ~final)))
-                ; No early return. Just bind accs.
-                `([~acc-name]
-                  (let [~@bind-fields]
-                    ~final)))
-              ; No final expression; return reduced or a vector
-              `([~final-name]
-                (if (instance? ~acc-type ~final-name)
-                  ; Normal return
-                  (let [~acc-name ~final-name]
-                    ~get-fields)
-                  ; Early return
-                  ~final-name)))
-           ; Reduce: destructure acc and turn recur into mutations
-           ([~acc-name ~element-name]
-            (let ~bind-fields
-              ~(rewrite-tails
-                 (fn rewrite-tail [form]
-                   (if (and (seq? form) (= 'recur (first form)))
-                     ; Recur becomes mutate and return acc
-                     (do (assert (= acc-count (count (rest form))))
-                         `(do ~@(map (fn [get-field value]
-                                      `(set! ~get-field ~value))
-                                    get-fields
-                                    (rest form))
-                              ~acc-name))
-                     ; Early return becomes a reduced value
-                     `(reduced ~form)))
-                 body))))))))

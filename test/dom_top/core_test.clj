@@ -329,6 +329,11 @@
                     {:x x, :i i}
                     (recur (inc i))))
            (loopr [i 0]
+                  [x [1 3 2] :via :reducer]
+                  (if (= x 3)
+                    {:x x, :i i}
+                    (recur (inc i))))
+           (loopr [i 0]
                   [x [1 3 2] :via :iterator]
                   (if (= x 3)
                     {:x x, :i i}
@@ -339,6 +344,12 @@
                (loopr [i 0]
                       [pair pairs :via :reduce
                        x    pair  :via :reduce]
+                      (if (= x 3)
+                        {:x x, :i i}
+                        (recur (inc i))))
+               (loopr [i 0]
+                      [pair pairs :via :reducer
+                       x    pair  :via :reducer]
                       (if (= x 3)
                         {:x x, :i i}
                         (recur (inc i))))
@@ -404,6 +415,12 @@
                       (recur))
                     :not-found)
              (loopr []
+                    [x [1 2 3] :via :reducer]
+                    (if (even? x)
+                      x
+                      (recur))
+                    :not-found)
+             (loopr []
                     [x [1 2 3] :via :iterator]
                     (if (even? x)
                       x
@@ -434,6 +451,24 @@
                (loopr []
                       [row matrix :via :iterator
                        x   row    :via :iterator]
+                      (if (= x 5)
+                        [:found 5]
+                        (recur)))
+               (loopr []
+                      [row matrix :via :reduce
+                       x   row    :via :reducer]
+                      (if (= x 5)
+                        [:found 5]
+                        (recur)))
+               (loopr []
+                      [row matrix :via :reducer
+                       x   row    :via :reduce]
+                      (if (= x 5)
+                        [:found 5]
+                        (recur)))
+               (loopr []
+                      [row matrix :via :reducer
+                       x   row    :via :reducer]
                       (if (= x 5)
                         [:found 5]
                         (recur))))))))
@@ -513,6 +548,12 @@
       (quick-bench
         (loopr [sum 0, count 0]
                [x bigvec :via :reduce]
+               (recur (+ sum x) (inc count))))
+
+      (println "\nMulti-acc loopr (reducer) over vector")
+      (quick-bench
+        (loopr [sum 0, count 0]
+               [x bigvec :via :reducer]
                (recur (+ sum x) (inc count))))
 
       (println "\nMulti-acc loopr (iterator) over vector")
@@ -622,7 +663,13 @@
       (quick-bench
         (loopr [sum 0]
                [x ary :via :array]
-               (recur (+ sum x)))))
+               (recur (+ sum x))))
+
+      (println "\nMulti-acc loopr over array")
+      (quick-bench
+        (loopr [sum 0, count 0]
+               [x ary :via :array]
+               (recur (+ sum x) (inc count)))))
 
     (let [matrix (to-array-2d (repeat 1000 (range 1000)))]
       (println "\nSingle-acc reduce over 2d array")
@@ -636,7 +683,6 @@
                 x   ^"[Ljava.lang.Long;" row    :via :array]
                (recur (+ sum x)))))
     ))
-
 
 (deftest reducer-test
   (testing "no acc"
@@ -744,8 +790,7 @@
                         [4 1 9 9 9]))))
     ))
 
-(binding [*warn-on-reflection* true
-          *unchecked-math* :warn-on-boxed]
+(binding [*unchecked-math* :warn-on-boxed]
   (deftest ^:perf reducer-perf-test
     (let [bigvec (->> (range 100000) vec)]
       (testing "multiple accumulators"
