@@ -255,11 +255,11 @@
 (defrecord Retry [bindings])
 
 (defmacro with-retry
-  "It's really fucking inconvenient not being able to recur from within (catch)
-  expressions. This macro wraps its body in a (loop [bindings] (try ...)).
-  Provides a (retry & new bindings) form which is usable within (catch) blocks:
-  when this form is returned by the body, the body will be retried with the new
-  bindings. For instance,
+  "It's inconvenient not being able to recur from within (catch) expressions.
+  This macro wraps its body in a (loop [bindings] (try ...)). Provides a (retry
+  & new bindings) form which is usable within (catch) blocks: when this form is
+  returned by the body, the body will be retried with the new bindings. For
+  instance,
 
       (with-retry [attempts 5]
         (network-request...)
