@@ -13,6 +13,7 @@ examples.
 - `bounded-future` is just like `future`, but for CPU-bound tasks.
 - `bounded-pmap`, by contrast, puts a global limit on parallelism for CPU-bound
   tasks.
+- `ex-promise` is a promise which can throw exceptions, like `future` does.
 - `disorderly` is a `do` block that evaluates statements in a new, random order
   every time, instead of sequentially.
 - `fcatch` lifts functions that throw exceptions into functions that *return*
@@ -43,7 +44,7 @@ core of dom-top's generator of mutable accumulators.
 
 ## License
 
-Copyright © 2017--2023 Kyle Kingsbury
+Copyright © 2017--2026 Kyle Kingsbury
 
 Distributed under the Eclipse Public License either version 1.0 or (at
 your option) any later version.

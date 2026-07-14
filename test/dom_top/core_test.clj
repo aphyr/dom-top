@@ -828,3 +828,48 @@
       (set! (.x1 a) [1 2 3])
       (is (= "foo" (.x0 a)))
       (is (= [1 2 3] (.x1 a))))))
+
+(deftest ex-promise-test
+  (testing "undelivered"
+    (let [p (ex-promise)]
+      (is (not (realized? p)))
+      (is (= ::timeout (deref p 1 ::timeout)))))
+
+  (testing "delivered"
+    (let [p (ex-promise)]
+      (deliver p :x)
+      (is (= :x @p)))
+
+    (let [p (ex-promise)]
+      (deliver p nil)
+      (is (= nil @p)))
+
+    (let [p (ex-promise)
+          ex (RuntimeException. "hi")]
+      (deliver p ex)
+      (is (= ex @p))))
+
+  (testing "thrown"
+    (let [p (ex-promise)]
+      (deliver-throw! p (RuntimeException. "hi"))
+      (is (thrown-with-msg? RuntimeException #"hi" @p))))
+
+  (testing "concurrent"
+    (dotimes [i 1000]
+      (let [p (ex-promise)
+            f1 (future (deliver p 1))
+            f2 (future (deliver p 2))
+            f3 (future (deliver-throw! p (RuntimeException. "hi")))
+            f4 (future (deliver-throw! p (RuntimeException. "there")))
+            results (mapv deref [f1 f2 f3 f4])
+            capture (fn [fut]
+                      (try
+                        [:res @fut]
+                        (catch RuntimeException e
+                          [:err e])))
+            res (capture p)]
+        (is (= 3 (count (filter nil? results))))
+        (is (vector? res))
+        (is (#{:res :err} (first res)))
+        (is (= res
+               (capture (first (remove nil? results)))))))))

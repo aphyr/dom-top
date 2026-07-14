@@ -5,17 +5,23 @@
                      [walk :as walk]]
             [clojure.java.io :as io]
             [riddley.walk :refer [macroexpand-all walk-exprs]])
-  (:import (java.lang Iterable)
-           (java.util Iterator)
-           (java.io File
-                    FileOutputStream)
-           ; oh no
+  (:import ; oh no
            (clojure.asm ClassVisitor
                         ClassWriter
                         Opcodes
                         Type)
            (clojure.lang DynamicClassLoader
-                         RT)))
+                         IBlockingDeref
+                         IDeref
+                         IFn
+                         IPending
+                         RT)
+           (java.io File
+                    FileOutputStream)
+           (java.lang Iterable)
+           (java.util Iterator)
+           (java.util.concurrent CountDownLatch
+                                 TimeUnit)))
 
 (defmacro assert+
   "Like Clojure assert, but throws customizable exceptions (by default,
@@ -1112,3 +1118,75 @@
                      ; Early return becomes a reduced value
                      `(reduced ~form)))
                  body))))))))
+
+(definterface IThrowingDeref
+  (deliverThrow [^Throwable t]))
+
+; A promise that can throw exceptions on deref, like futures.
+(deftype ExPromise [^CountDownLatch latch, value, error]
+  IDeref
+  (deref [_]
+    (.await latch)
+    (let [v @value]
+      (if (identical? ::throw v)
+        (throw @error)
+        v)))
+
+  IBlockingDeref
+  (deref [_ timeout-ms timeout-val]
+    (if (.await latch timeout-ms TimeUnit/MILLISECONDS)
+      (let [v @value]
+        (if (identical? ::throw v)
+          (throw @error)
+          v))
+      timeout-val))
+
+  IPending
+  (isRealized [_]
+    (zero? (.getCount latch)))
+
+  IFn
+  (invoke [this x]
+    (when (and (pos? (.getCount latch))
+               (compare-and-set! value latch x))
+      (.countDown latch)
+      this))
+
+  IThrowingDeref
+  (deliverThrow [this t]
+    (when (and (pos? (.getCount latch))
+               (compare-and-set! value latch ::throw))
+      (reset! error t)
+      (.countDown latch)
+      this))
+
+  (equals [this other]
+    (identical? this other))
+
+  (toString [this]
+    (let [pending? (pos? (.getCount latch))
+          value  @value
+          throw? (identical? ::throw value)]
+      (str "#ExPromise{:status "
+           (cond pending? ":pending"
+                 throw? ":failed"
+                 true   ":ready")
+           ", :val "
+           (pr-str
+             (cond pending? nil
+                   throw? @error
+                   true   value))
+           "}"))))
+
+(defn ex-promise
+  "Constructs a promise which can also throw. Works with standard deref and
+  deliver, but also supports (deliver-throw p throwable), which causes deref of
+  the promise to throw that Throwable."
+  []
+  (let [latch (CountDownLatch. 1)]
+    (ExPromise. latch (atom latch) (atom nil))))
+
+(defn deliver-throw!
+  "Delivers a Throwable to an ExPromise which will be thrown on deref."
+  [^IThrowingDeref p, ^Throwable t]
+  (.deliverThrow p t))
