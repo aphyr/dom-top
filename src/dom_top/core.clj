@@ -1190,3 +1190,48 @@
   "Delivers a Throwable to an ExPromise which will be thrown on deref."
   [^IThrowingDeref p, ^Throwable t]
   (.deliverThrow p t))
+
+(defn murder-thread!
+  "Interrupts a thread until it terminates."
+  [^Thread t]
+  (loop [next-log-time (+ (System/nanoTime) 1000000000)]
+    (if (not= Thread$State/TERMINATED (.getState t))
+      (if (< next-log-time (System/nanoTime))
+        ; If you get here, something has gone VERY wonky; hopefully they'll
+        ; forgive the printing.
+        (do (binding [*out* *err*]
+              (println "dom-top.core: attempting to murder thread"
+                       (.getName t) "(" (.getId t)
+                       ") but it just won't die."))
+            (.interrupt t)
+            (Thread/sleep 10)
+            (recur (+ next-log-time 1000000000)))
+        (do (.interrupt t)
+            (Thread/sleep 10)
+            (recur next-log-time))))))
+
+(defmacro timeout
+  "Evaluates `body`, returning `timeout-val` if it does not complete within
+  `millis` milliseconds.
+
+  This is intended for calling IO-bound code--perhaps poorly-behaved code which
+  you did not write. It spawns a virtual thread to evaluate body, and
+  interrupts it (repeatedly, if necessary) when the timeout is up. Guarantees
+  that the thread will be terminated before returning. Preserves Clojure
+  dynamic bindings."
+  [millis timeout-val & body]
+  `(let [res#    (ex-promise)
+         f#      (bound-fn ~'f [] (deliver res# (do ~@body)))
+         thread# (.. (Thread/ofVirtual)
+                     (name (str (.getName (Thread/currentThread))
+                                " timeout"))
+                     (uncaughtExceptionHandler
+                       (reify Thread$UncaughtExceptionHandler
+                         (uncaughtException [~'_, ~'_, err#]
+                           (deliver-throw! res# err#))))
+                   (start f#))
+        maybe# (deref res# ~millis ::timeout)]
+     (if (identical? maybe# ::timeout)
+       (do (murder-thread! thread#)
+           ~timeout-val)
+       maybe#)))

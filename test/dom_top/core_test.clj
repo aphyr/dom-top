@@ -873,3 +873,29 @@
         (is (#{:res :err} (first res)))
         (is (= res
                (capture (first (remove nil? results)))))))))
+
+(deftest timeout-test
+  (testing "fast"
+    (is (= ::success (timeout 1000 ::timed-out ::success)))
+    (is (thrown? ArithmeticException
+                 (timeout 1000 ::timed-out (/ 1 0)))))
+
+  (testing "slow"
+    (is (= ::timed-out (timeout 1 ::timed-out (Thread/sleep 10)))))
+
+  (testing "persistent"
+    (let [counter (atom 0)]
+      (is (= ::timed-out
+             (timeout
+               1 ::timed-out
+               (loop [interrupt-budget 3]
+                 (when (pos? interrupt-budget)
+                   (recur (try (swap! counter inc)
+                               (Thread/sleep 1)
+                               interrupt-budget
+                               (catch InterruptedException e
+                                 (dec interrupt-budget)))))))))
+      (let [c1 @counter
+            _ (Thread/sleep 5)
+            c2 @counter]
+        (is (= c1 c2))))))
