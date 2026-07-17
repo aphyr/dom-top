@@ -4,7 +4,7 @@
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :dependencies [[riddley "0.2.2"]] ; For code-walking
-  :profiles {:dev {:dependencies [[org.clojure/clojure "1.12.4"]
+  :profiles {:dev {:dependencies [[org.clojure/clojure "1.12.5"]
                                   [org.clj-commons/primitive-math "1.0.1"]
                                   [criterium "0.4.6"]]}}
   :test-selectors {:perf :perf
