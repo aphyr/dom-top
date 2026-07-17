@@ -1,7 +1,9 @@
 # Dom Top
 
 Unorthodox control flow, for Clojurists with masochistic sensibilities.
-Available via [clojars](https://clojars.org/dom-top).
+
+![](https://clojars.org/dom-top/latest-version.svg)
+[![cljdoc badge](https://cljdoc.org/badge/dom-top/dom-top)](https://cljdoc.org/d/dom-top/dom-top)
 
 ## Tour
 
