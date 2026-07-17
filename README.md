@@ -2,7 +2,8 @@
 
 Unorthodox control flow, for Clojurists with masochistic sensibilities.
 
-![](https://clojars.org/dom-top/latest-version.svg)
+[![](https://clojars.org/dom-top/latest-version.svg)](https://clojars.org/dom-top)
+
 [![cljdoc badge](https://cljdoc.org/badge/dom-top/dom-top)](https://cljdoc.org/d/dom-top/dom-top)
 
 ## Tour
