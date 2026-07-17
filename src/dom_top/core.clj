@@ -707,9 +707,9 @@
 
   For example,
 
-    (loopr [sum 0]
-           [x [1 2 3]]
-      (recur (+ sum x)))
+      (loopr [sum 0]
+             [x [1 2 3]]
+        (recur (+ sum x)))
 
   returns 6: the sum of 1, 2 and 3.
 
@@ -719,26 +719,26 @@
   traverse multiple dimensions. For instance, to get the mean of all elements
   in a matrix:
 
-    (loopr [count 0
-            sum   0]
-           [row [[1 2 3] [4 5 6] [7 8 9]]
-            x   row]
-      (recur (inc count) (+ sum x))
-      (/ sum count))
-    ; returns 45/9 = 5
+      (loopr [count 0
+              sum   0]
+             [row [[1 2 3] [4 5 6] [7 8 9]]
+              x   row]
+        (recur (inc count) (+ sum x))
+        (/ sum count))
+      ; returns 45/9 = 5
 
   Here, we have a body which recurs, and a final expression `(/ sum count)`,
   which is evaluated with the final value of the accumulators. Compare this to
   the equivalent nested reduce:
 
-    (let [[sum count] (reduce (fn [[count sum] row]
-                                (reduce (fn [[count sum] x]
-                                          [(inc count) (+ sum x)])
-                                        [count sum]
-                                        row))
-                              [0 0]
-                              [[1 2 3] [4 5 6] [7 8 9]])]
-      (/ sum count))
+      (let [[sum count] (reduce (fn [[count sum] row]
+                                  (reduce (fn [[count sum] x]
+                                            [(inc count) (+ sum x)])
+                                          [count sum]
+                                          row))
+                                [0 0]
+                                [[1 2 3] [4 5 6] [7 8 9]])]
+        (/ sum count))
 
   This requires an enclosing `let` binding to transform the loop results, two
   calls to reduce, each with their own function, creating and destructuring
@@ -748,16 +748,16 @@
   It also requires deeper indentation. Here's the same loop expressed as a
   flat `loop` over seqs:
 
-    (loop [count 0
-           sum   0
-           rows  [[1 2 3] [4 5 6] [7 8 9]]
-           row   (first rows)]
-      (if-not (seq rows)
-        (/ sum count)       ; Done with iteration
-        (if-not (seq row)   ; Done with row; move on to next row
-          (recur count sum (next rows) (first (next rows)))
-          (let [[x & row'] row]
-            (recur (inc count) (+ sum x) rows row')))))
+      (loop [count 0
+             sum   0
+             rows  [[1 2 3] [4 5 6] [7 8 9]]
+             row   (first rows)]
+        (if-not (seq rows)
+          (/ sum count)       ; Done with iteration
+          (if-not (seq row)   ; Done with row; move on to next row
+            (recur count sum (next rows) (first (next rows)))
+            (let [[x & row'] row]
+              (recur (inc count) (+ sum x) rows row')))))
 
   This version is less indented but also considerably longer, and the
   interweaving of traversal machinery and accumulation logic makes it
@@ -772,20 +772,20 @@
   with mutable iterators when given multiple accumulators. You can also control
   the iteration tactic for each collection explicitly:
 
-    (loopr [count 0
-            sum   0]
-           [row [[1 2 3] [4 5 6] [7 8 9]] :via :reduce
-            x   row                       :via :iterator]
-      (recur (inc count) (+ sum x))
-      (/ sum count))
+      (loopr [count 0
+              sum   0]
+             [row [[1 2 3] [4 5 6] [7 8 9]] :via :reduce
+              x   row                       :via :iterator]
+        (recur (inc count) (+ sum x))
+        (/ sum count))
 
   This compiles into a `reduce` over rows, and a `loop` over each row using an
   iterators. For array iteration, use `:via :array`:
 
-    (loopr [sum 0]
-           [x (long-array (range 10000)) :via :array]
-           (recur (+ sum x)))
-    ; => 49995000
+      (loopr [sum 0]
+             [x (long-array (range 10000)) :via :array]
+             (recur (+ sum x)))
+      ; => 49995000
 
   Note that alength/aget are *very* sensitive to type hints; use `lein check`
   to ensure that you're not using reflection, and add type hints as necessary.
@@ -793,35 +793,35 @@
   longs). For nested array reduction, make sure to hint inner collections, like
   so:
 
-    (loopr [sum 0]
-           [row                        matrix :via :array
-            x   ^\"[Ljava.lang.Long;\" row    :via :array]
-           (recur (+ sum x)))))
+      (loopr [sum 0]
+             [row                        matrix :via :array
+              x   ^\"[Ljava.lang.Long;\" row    :via :array]
+             (recur (+ sum x)))))
 
   Like `loop`, `loopr` supports early return. Any non `(recur ...)` form in
   tail position in the body is returned immediately, without visiting any other
   elements in the collection(s). To search for the first odd number in
   collection, returning that number and its index:
 
-    (loopr [i 0]
-           [x [0 3 4 5]]
-           (if (odd? x)
-             {:i i, :x x}
-             (recur (inc i))))
-    ; => {:i 1, :x 3}
+      (loopr [i 0]
+             [x [0 3 4 5]]
+             (if (odd? x)
+               {:i i, :x x}
+               (recur (inc i))))
+      ; => {:i 1, :x 3}
 
   When no accumulators are provided, loopr still iterates, returning any
   early-returned value, or the final expression when iteration completes, or
   `nil` otherwise. Here we find an key in a map by value. Note that we can also
   destructure in iterator bindings.
 
-    (loopr []
-           [[k v] {:x 1, :y 2}]
-           (if (= v 2)
-             k
-             (recur))
-           :not-found)
-    ; => :y"
+      (loopr []
+             [[k v] {:x 1, :y 2}]
+             (if (= v 2)
+               k
+               (recur))
+             :not-found)
+      ; => :y"
   [accumulator-bindings element-bindings body & [final :as final-forms]]
   (assert (<= 2 (count element-bindings))) ; TODO: determine semantics for this?
   (assert (even? (count accumulator-bindings)))
@@ -973,22 +973,22 @@
   reduction. Returns a function with 0, 1, and 2-arity forms suitable for use
   with `transduce`.
 
-    (transduce identity
-               (reducer [sum 0, count 0]
-                        [x]
-                        (recur (+ sum x) (inc count))
-                        (/ sum count))
-               [1 2 2])
-    ; => 5/3
+      (transduce identity
+                 (reducer [sum 0, count 0]
+                          [x]
+                          (recur (+ sum x) (inc count))
+                          (/ sum count))
+                 [1 2 2])
+      ; => 5/3
 
   This is logically equivalent to:
 
-    (transduce identity
-               (fn ([] [0 0])
-                   ([[sum count]] (/ sum count))
-                   ([[sum count] x]
-                    [(+ sum x) (inc count)]))
-               [1 2 2])
+      (transduce identity
+                 (fn ([] [0 0])
+                     ([[sum count]] (/ sum count))
+                     ([[sum count] x]
+                      [(+ sum x) (inc count)]))
+                 [1 2 2])
 
   For zero and one-accumulator forms, these are equivalent. However, `reducer`
   is faster for reducers with more than one accumulator. Its identity arity
@@ -1008,15 +1008,15 @@
   and may not *have* accumulators any more--hence the accumulator bindings will
   not be available in the final expression.
 
-    (transduce identity
-               (reducer [sum 0, count 0 :as acc]
-                        [x]
-                        (if (= count 2)
-                          [:early sum]
-                          (recur (+ sum x) (inc count)))
-                        [:final acc])
-               [4 1 9 9 9])
-    ; => [:early 5]"
+      (transduce identity
+                 (reducer [sum 0, count 0 :as acc]
+                          [x]
+                          (if (= count 2)
+                            [:early sum]
+                            (recur (+ sum x) (inc count)))
+                          [:final acc])
+                 [4 1 9 9 9])
+      ; => [:early 5]"
   [accumulator-bindings element-bindings body & [final :as final-forms]]
   (assert (even? (count accumulator-bindings)))
   (assert (= 1 (count element-bindings)))
